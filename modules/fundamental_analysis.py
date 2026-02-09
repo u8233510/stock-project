@@ -44,9 +44,9 @@ def show_fundamental_analysis():
     rev_query = f"SELECT date as '日期', revenue FROM stock_month_revenue_monthly WHERE stock_id='{sid}' ORDER BY date DESC LIMIT 12"
     rev_df = pd.read_sql(rev_query, conn)
     if not rev_df.empty:
-        # ✅ 修正關鍵：統一欄位名稱為 '營收(百萬元)'，並加上千分位
-        rev_df['營收(百萬元)'] = (rev_df['revenue'] / 1000).apply(lambda x: f"{x:,.2f}")
-        rev_df = rev_df[['日期', '營收(百萬元)']]
+        # ✅ 修正關鍵：統一欄位名稱為 '營收(億)'，並加上千分位
+        rev_df['營收(億)'] = (rev_df['revenue'] / 100000000).apply(lambda x: f"{x:,.2f}")
+        rev_df = rev_df[['日期', '營收(億)']]
     
     # (2+4) 每季獲利與 EPS：安全轉置處理
     profit_raw = pd.read_sql(f"SELECT date, type, value FROM stock_financial_statements WHERE stock_id='{sid}' AND type IN ('EPS', 'Net Profit') ORDER BY date DESC LIMIT 16", conn)

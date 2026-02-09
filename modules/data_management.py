@@ -115,22 +115,28 @@ def show_data_management():
         st.subheader("📋 案件：標準日線指標同步")
         if ingest_manager:
             if st.button("🔥 啟動全方位數據同步", use_container_width=True):
-                log_container = st.container()
                 with st.spinner("同步進行中..."):
                     try:
-                        with log_container:
-                            placeholder = st.empty()
-                            importlib.reload(ingest_manager)
-                            failed_items = ingest_manager.main(placeholder=placeholder)
-                            if not failed_items:
-                                st.success("✅ 所有日線指標同步成功！")
-                            else:
-                                st.warning(f"⚠️ 部分指標同步失敗：{', '.join(failed_items)}")
+                        # 重新載入以確保抓到最新代碼
+                        importlib.reload(ingest_manager)
+                        
+                        # ✅ 配合您的 start_ingest 建立日誌顯示區
+                        log_area = st.empty() 
+                        
+                        # ✅ 呼叫您的 start_ingest 並傳入日誌區
+                        failed_log = ingest_manager.start_ingest(st_placeholder=log_area)
+                        
+                        if failed_log:
+                            st.warning(f"同步完成，但有 {len(failed_log)} 個錯誤。")
+                            with st.expander("查看錯誤明細"):
+                                for msg in failed_log:
+                                    st.write(f"❌ {msg}")
+                        else:
+                            st.success("✅ 所有日線指標同步成功！")
                     except Exception as e:
                         st.error(f"💥 程式執行中斷 (嚴重錯誤)：{e}")
 
     elif task_type == "⏱️ 分鐘與主動力度 (新 Ingest Minute)":
-        st.subheader("📋 案件：精準分鐘級補洞同步")
-        st.info(f"當前設定：從 **{cfg['ingest_minute']['start_date']}** 開始補齊分鐘資料。")
-        if st.button("🚀 啟動分鐘補洞與主動流向運算", use_container_width=True):
+        st.subheader("📋 案件：分鐘 K 線與主動力度補洞")
+        if st.button("🚀 啟動分鐘級數據補洞 (含 A/B 對帳)", use_container_width=True):
             run_minute_task(cfg)

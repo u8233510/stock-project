@@ -136,7 +136,17 @@ TABLE_REGISTRY = {
             dataset TEXT NOT NULL, trade_date TEXT NOT NULL, stock_id TEXT NOT NULL,
             fetched_at TEXT, row_count INTEGER, status TEXT, message TEXT,
             PRIMARY KEY (dataset, trade_date, stock_id)
-        );"""
+        );""",
+    "data_ingest_log": """
+        CREATE TABLE IF NOT EXISTS data_ingest_log (
+            date TEXT NOT NULL, 
+            stock_id TEXT NOT NULL,
+            api_count INTEGER DEFAULT 0,
+            db_count INTEGER DEFAULT 0,
+            status TEXT,         -- ✅ 增加這行：Success / Failed / NoTrade
+            updated_at TEXT,
+            PRIMARY KEY (date, stock_id)
+        );"""    
 }
 
 # 索引配置
@@ -199,11 +209,6 @@ def init_database():
             for idx in INDEX_REGISTRY.get(key, []):
                 cur.execute(idx)
                 
-    # 強制初始化分析擴充表與日誌
-    cur.execute(TABLE_REGISTRY["active_flow_daily"])
-    cur.execute(TABLE_REGISTRY["ohlcv_minute"])
-    cur.execute(TABLE_REGISTRY["ingest_log"])
-    
     conn.commit()
     conn.close()
     print("✅ 資料庫結構初始化完成。")
