@@ -1,0 +1,14 @@
+# 先忽略所有東西
+*
+
+# 排除例外：只要 .py 檔、.gitignore 和 README.md
+!*.py
+!.gitignore
+!README.md
+!*/
+
+# 絕對不要上傳資料庫與設定檔
+*.db
+config.json
+data/
+__pycache__/
