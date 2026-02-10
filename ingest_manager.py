@@ -5,78 +5,7 @@ import pandas as pd
 from FinMind.data import DataLoader
 
 import database
-
-
-DATA_INGEST_LOG_SCHEMA = """
-CREATE TABLE IF NOT EXISTS data_ingest_log (
-    date TEXT NOT NULL,
-    stock_id TEXT NOT NULL,
-    api TEXT NOT NULL,
-    api_count INTEGER DEFAULT 0,
-    db_count INTEGER DEFAULT 0,
-    status TEXT,
-    updated_at TEXT,
-    PRIMARY KEY (date, stock_id, api)
-);
-"""
-
-
-def _ensure_data_ingest_log_table(conn):
-    cols = database.get_table_columns(conn, "data_ingest_log")
-    if not cols:
-        conn.execute(DATA_INGEST_LOG_SCHEMA)
-        conn.commit()
-        return
-
-    # 舊表沒有 api 欄位時，做一次無痛升級，避免 no column 錯誤。
-    if "api" not in cols:
-        with conn:
-            conn.execute("ALTER TABLE data_ingest_log RENAME TO data_ingest_log_old")
-            conn.execute(DATA_INGEST_LOG_SCHEMA)
-            conn.execute(
-                """
-                INSERT INTO data_ingest_log(date, stock_id, api, api_count, db_count, status, updated_at)
-                SELECT date, stock_id, 'legacy', api_count, db_count, status, updated_at
-                FROM data_ingest_log_old
-                """
-            )
-            conn.execute("DROP TABLE data_ingest_log_old")
-
-
-def _get_data_ingest_status(conn, stock_id, api_name, trade_date):
-    cols = database.get_table_columns(conn, "data_ingest_log")
-    if not cols:
-        return None
-
-    if "api" in cols:
-        sql = "SELECT status FROM data_ingest_log WHERE stock_id = ? AND api = ? AND date = ? LIMIT 1"
-        row = conn.execute(sql, (stock_id, api_name, trade_date)).fetchone()
-    else:
-        # 升級前相容讀法
-        sql = "SELECT status FROM data_ingest_log WHERE stock_id = ? AND date = ? LIMIT 1"
-        row = conn.execute(sql, (stock_id, trade_date)).fetchone()
-    return row[0] if row else None
-
-
-def _write_data_ingest_log(conn, trade_date, stock_id, api_name, api_count, db_count, status):
-    cols = database.get_table_columns(conn, "data_ingest_log")
-    if "api" in cols:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO data_ingest_log(date, stock_id, api, api_count, db_count, status, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
-            """,
-            (trade_date, stock_id, api_name, int(api_count), int(db_count), status),
-        )
-    else:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO data_ingest_log(date, stock_id, api_count, db_count, status, updated_at)
-            VALUES (?, ?, ?, ?, ?, datetime('now', 'localtime'))
-            """,
-            (trade_date, stock_id, int(api_count), int(db_count), status),
-        )
-    conn.commit()
+from ingest_log_utils import ensure_data_ingest_log_table, get_data_ingest_status, write_data_ingest_log
 
 
 def process_data(df, table, conn):
@@ -157,7 +86,7 @@ def _filter_dates_by_log(conn, missing_dates, stock_id, api_name):
     fetch_dates = []
     for d in missing_dates:
         d_str = d.strftime("%Y-%m-%d")
-        status = _get_data_ingest_status(conn, stock_id, api_name, d_str)
+        status = get_data_ingest_status(conn, stock_id, api_name, d_str)
         if status in {"Success", "NoTrade"}:
             continue
         fetch_dates.append(d)
@@ -170,7 +99,7 @@ def start_ingest(st_placeholder=None):
     api = DataLoader()
     api.login_by_token(api_token=cfg["finmind"]["api_token"])
     conn = database.get_db_connection(cfg)
-    _ensure_data_ingest_log_table(conn)
+    ensure_data_ingest_log_table(conn)
 
     universe = cfg.get("universe", [])
     enabled = cfg.get("datasets", {}).get("enabled", [])
@@ -223,9 +152,9 @@ def start_ingest(st_placeholder=None):
                             if df is not None and not df.empty:
                                 clean_df = process_data(df, table, conn)
                                 upsert_data(conn, table, clean_df)
-                                _write_data_ingest_log(conn, d_str, sid, key, len(df), len(clean_df), "Success")
+                                write_data_ingest_log(conn, d_str, sid, key, len(df), len(clean_df), "Success")
                             else:
-                                _write_data_ingest_log(conn, d_str, sid, key, 0, 0, "NoTrade")
+                                write_data_ingest_log(conn, d_str, sid, key, 0, 0, "NoTrade")
                             time.sleep(sleep_sec)
                     else:
                         req_dates = [d.strftime("%Y-%m-%d") for d in pd.date_range(start, end, freq="B")]
@@ -244,14 +173,14 @@ def start_ingest(st_placeholder=None):
                         for d_str in req_dates:
                             db_count = existing_by_date.get(d_str, 0)
                             status = "Success" if db_count > 0 else "NoTrade"
-                            _write_data_ingest_log(conn, d_str, sid, key, db_count, db_count, status)
+                            write_data_ingest_log(conn, d_str, sid, key, db_count, db_count, status)
 
                     log(f"    🚀 [{key}] 同步成功: {s_str} ~ {e_str}")
                 except Exception as e:
                     log(f"    ❌ [{key}] 失敗: {e}")
                     failed_log.append(f"{sid} {key}: {e}")
                     for d_str in pd.date_range(start, end, freq="B").strftime("%Y-%m-%d"):
-                        _write_data_ingest_log(conn, d_str, sid, key, 0, 0, "Failed")
+                        write_data_ingest_log(conn, d_str, sid, key, 0, 0, "Failed")
 
                 time.sleep(sleep_sec)
 
