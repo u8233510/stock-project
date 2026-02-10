@@ -52,6 +52,10 @@ def _get_known_holidays(conn, stock_id=None, api_name=None):
     return holidays
 
 
+def _exclude_weekends(dates):
+    return [d for d in dates if d.weekday() < 5]
+
+
 def _merge_dates_to_ranges(dates):
     if not dates:
         return []
