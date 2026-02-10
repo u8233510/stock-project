@@ -91,19 +91,32 @@ def _get_known_holidays(conn):
     return holidays
 
 
-def get_missing_ranges(conn, table_name, stock_id, date_col, target_start, rolling_recheck_days=1):
+
+
+def _resolve_column(conn, table_name, keywords, configured_col=None):
+    cols = database.get_table_columns(conn, table_name)
+    if not cols:
+        return configured_col
+
+    if configured_col and configured_col in cols:
+        return configured_col
+
+    matched = database.match_column(cols, keywords)
+    return matched or configured_col
+
+def get_missing_ranges(conn, table_name, stock_id, stock_col, date_col, target_start, rolling_recheck_days=1):
     available_cols = database.get_table_columns(conn, table_name)
     t_start = datetime.strptime(target_start, "%Y-%m-%d").date()
     t_end = datetime.now().date()
 
-    if not available_cols or date_col not in available_cols:
+    if not available_cols or date_col not in available_cols or stock_col not in available_cols:
         return [(t_start, t_end)]
 
     try:
         sql = (
             f"SELECT DISTINCT substr({date_col}, 1, 10) "
             f"FROM {table_name} "
-            f"WHERE stock_id = ? AND {date_col} != ''"
+            f"WHERE {stock_col} = ? AND {date_col} != ''"
         )
         exists = {
             datetime.strptime(str(r[0])[:10], "%Y-%m-%d").date()
@@ -190,11 +203,14 @@ def start_ingest(st_placeholder=None):
                 continue
 
             fm_api, table, d_col = d_map[key]
+            resolved_date_col = _resolve_column(conn, table, ["date"], configured_col=d_col)
+            resolved_stock_col = _resolve_column(conn, table, ["stock", "id"], configured_col="stock_id")
             missing_ranges = get_missing_ranges(
                 conn,
                 table,
                 sid,
-                d_col,
+                resolved_stock_col,
+                resolved_date_col,
                 t_start,
                 rolling_recheck_days=rolling_recheck_days,
             )
@@ -233,7 +249,10 @@ def start_ingest(st_placeholder=None):
                             if df is not None and not df.empty:
                                 clean_df = process_data(df, table, conn)
                                 upsert_data(conn, table, clean_df)
-                                db_count = int((clean_df[d_col].astype(str).str[:10] == d_str).sum()) if d_col in clean_df.columns else len(clean_df)
+                                if resolved_date_col in clean_df.columns:
+                                    db_count = int((clean_df[resolved_date_col].astype(str).str[:10] == d_str).sum())
+                                else:
+                                    db_count = len(clean_df)
                                 _write_data_ingest_log(conn, d_str, sid, fm_api, len(df), db_count, "Success")
                             else:
                                 _write_data_ingest_log(conn, d_str, sid, fm_api, 0, 0, "NoTrade")

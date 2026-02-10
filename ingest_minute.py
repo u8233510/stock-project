@@ -44,6 +44,23 @@ def _get_known_holidays(conn):
     return holidays
 
 
+
+
+def _resolve_required_column(conn, table_name, keywords, default=None):
+    cols = database.get_table_columns(conn, table_name)
+    if default and default in cols:
+        return default
+    matched = database.match_column(cols, keywords)
+    if matched:
+        return matched
+    return default
+
+
+def _require_column(column_name, table_name, keywords):
+    if not column_name:
+        raise RuntimeError(f"找不到 {table_name} 欄位，關鍵字: {keywords}")
+    return column_name
+
 def run_minute_task(cfg):
     """
     統一補洞規則：
@@ -72,8 +89,36 @@ def run_minute_task(cfg):
     _ensure_data_ingest_log_table(conn)
     known_holidays = _get_known_holidays(conn)
 
-    min_cols = database.get_table_columns(conn, "stock_ohlcv_minute")
-    time_col = database.match_column(min_cols, ["date"]) or "date_time"
+    time_col = _require_column(
+        _resolve_required_column(conn, "stock_ohlcv_minute", ["date"], default="date_time"),
+        "stock_ohlcv_minute",
+        ["date"],
+    )
+    minute_stock_col = _require_column(
+        _resolve_required_column(conn, "stock_ohlcv_minute", ["stock", "id"], default="stock_id"),
+        "stock_ohlcv_minute",
+        ["stock", "id"],
+    )
+    flow_date_col = _require_column(
+        _resolve_required_column(conn, "stock_active_flow_daily", ["date"], default="date"),
+        "stock_active_flow_daily",
+        ["date"],
+    )
+    flow_stock_col = _require_column(
+        _resolve_required_column(conn, "stock_active_flow_daily", ["stock", "id"], default="stock_id"),
+        "stock_active_flow_daily",
+        ["stock", "id"],
+    )
+    flow_buy_col = _require_column(
+        _resolve_required_column(conn, "stock_active_flow_daily", ["active", "buy"], default="active_buy_vol"),
+        "stock_active_flow_daily",
+        ["active", "buy"],
+    )
+    flow_sell_col = _require_column(
+        _resolve_required_column(conn, "stock_active_flow_daily", ["active", "sell"], default="active_sell_vol"),
+        "stock_active_flow_daily",
+        ["active", "sell"],
+    )
 
     for d in date_range:
         d_obj = pd.to_datetime(d).date()
@@ -109,11 +154,11 @@ def run_minute_task(cfg):
                     )
 
                     df_min = df_min.fillna(0).reset_index().rename(columns={"date_time": time_col})
-                    df_min["stock_id"] = sid
+                    df_min[minute_stock_col] = sid
 
                     with conn:
                         conn.execute(
-                            f"DELETE FROM stock_ohlcv_minute WHERE stock_id = ? AND date({time_col}) = date(?)",
+                            f"DELETE FROM stock_ohlcv_minute WHERE {minute_stock_col} = ? AND date({time_col}) = date(?)",
                             (sid, d),
                         )
                         df_min.to_sql("stock_ohlcv_minute", conn, if_exists="append", index=False, method="multi")
@@ -121,15 +166,15 @@ def run_minute_task(cfg):
                         daily_flow = pd.DataFrame(
                             [
                                 {
-                                    "date": d,
-                                    "stock_id": sid,
-                                    "active_buy_vol": int(df_min["active_buy_vol"].sum()),
-                                    "active_sell_vol": int(df_min["active_sell_vol"].sum()),
+                                    flow_date_col: d,
+                                    flow_stock_col: sid,
+                                    flow_buy_col: int(df_min["active_buy_vol"].sum()),
+                                    flow_sell_col: int(df_min["active_sell_vol"].sum()),
                                 }
                             ]
                         )
                         conn.execute(
-                            "DELETE FROM stock_active_flow_daily WHERE stock_id = ? AND date(date) = date(?)",
+                            f"DELETE FROM stock_active_flow_daily WHERE {flow_stock_col} = ? AND date({flow_date_col}) = date(?)",
                             (sid, d),
                         )
                         daily_flow.to_sql("stock_active_flow_daily", conn, if_exists="append", index=False)
