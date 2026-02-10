@@ -130,7 +130,7 @@ def get_pending_dates(conn, stock_id, api_name, target_start, target_end=None, c
         return []
 
     holidays = _get_known_holidays(conn, stock_id=stock_id, api_name=api_name)
-    candidate_dates = [d for d in candidate_dates if d not in holidays]
+    candidate_dates = [d for d in candidate_dates if d == today or d not in holidays]
     if not candidate_dates:
         return []
 
@@ -153,7 +153,10 @@ def get_pending_dates(conn, stock_id, api_name, target_start, target_end=None, c
     pending_dates = []
     for d in candidate_dates:
         d_str = d.strftime("%Y-%m-%d")
-        if status_map.get(d_str) in {"Success", "NoTrade"}:
+        status = status_map.get(d_str)
+        if status == "Success":
+            continue
+        if d != today and status == "NoTrade":
             continue
         pending_dates.append(d)
 
@@ -244,7 +247,10 @@ def start_ingest(st_placeholder=None):
             try:
                 for d_str in [d.strftime("%Y-%m-%d") for d in pending_dates]:
                     status = _get_data_ingest_status(conn, sid, d_str, fm_api)
-                    if status in {"Success", "NoTrade"}:
+                    if status == "Success":
+                        continue
+                    is_today = d_str == datetime.now().strftime("%Y-%m-%d")
+                    if (not is_today) and status == "NoTrade":
                         continue
 
                     if key == "branch":
