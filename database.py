@@ -139,14 +139,15 @@ TABLE_REGISTRY = {
         );""",
     "data_ingest_log": """
         CREATE TABLE IF NOT EXISTS data_ingest_log (
-            date TEXT NOT NULL, 
+            date TEXT NOT NULL,
             stock_id TEXT NOT NULL,
+            api TEXT NOT NULL,
             api_count INTEGER DEFAULT 0,
             db_count INTEGER DEFAULT 0,
-            status TEXT,         -- ✅ 增加這行：Success / Failed / NoTrade
+            status TEXT,         -- Success / Failed / NoTrade
             updated_at TEXT,
-            PRIMARY KEY (date, stock_id)
-        );"""    
+            PRIMARY KEY (date, stock_id, api)
+        );"""
 }
 
 # 索引配置

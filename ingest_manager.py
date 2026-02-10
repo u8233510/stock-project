@@ -7,6 +7,78 @@ from FinMind.data import DataLoader
 import database
 
 
+DATA_INGEST_LOG_SCHEMA = """
+CREATE TABLE IF NOT EXISTS data_ingest_log (
+    date TEXT NOT NULL,
+    stock_id TEXT NOT NULL,
+    api TEXT NOT NULL,
+    api_count INTEGER DEFAULT 0,
+    db_count INTEGER DEFAULT 0,
+    status TEXT,
+    updated_at TEXT,
+    PRIMARY KEY (date, stock_id, api)
+);
+"""
+
+
+def _ensure_data_ingest_log_table(conn):
+    cols = database.get_table_columns(conn, "data_ingest_log")
+    if not cols:
+        conn.execute(DATA_INGEST_LOG_SCHEMA)
+        conn.commit()
+        return
+
+    # 舊表沒有 api 欄位時，做一次無痛升級，避免 no column 錯誤。
+    if "api" not in cols:
+        with conn:
+            conn.execute("ALTER TABLE data_ingest_log RENAME TO data_ingest_log_old")
+            conn.execute(DATA_INGEST_LOG_SCHEMA)
+            conn.execute(
+                """
+                INSERT INTO data_ingest_log(date, stock_id, api, api_count, db_count, status, updated_at)
+                SELECT date, stock_id, 'legacy', api_count, db_count, status, updated_at
+                FROM data_ingest_log_old
+                """
+            )
+            conn.execute("DROP TABLE data_ingest_log_old")
+
+
+def _get_data_ingest_status(conn, stock_id, api_name, trade_date):
+    cols = database.get_table_columns(conn, "data_ingest_log")
+    if not cols:
+        return None
+
+    if "api" in cols:
+        sql = "SELECT status FROM data_ingest_log WHERE stock_id = ? AND api = ? AND date = ? LIMIT 1"
+        row = conn.execute(sql, (stock_id, api_name, trade_date)).fetchone()
+    else:
+        # 升級前相容讀法
+        sql = "SELECT status FROM data_ingest_log WHERE stock_id = ? AND date = ? LIMIT 1"
+        row = conn.execute(sql, (stock_id, trade_date)).fetchone()
+    return row[0] if row else None
+
+
+def _write_data_ingest_log(conn, trade_date, stock_id, api_name, api_count, db_count, status):
+    cols = database.get_table_columns(conn, "data_ingest_log")
+    if "api" in cols:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO data_ingest_log(date, stock_id, api, api_count, db_count, status, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+            """,
+            (trade_date, stock_id, api_name, int(api_count), int(db_count), status),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO data_ingest_log(date, stock_id, api_count, db_count, status, updated_at)
+            VALUES (?, ?, ?, ?, ?, datetime('now', 'localtime'))
+            """,
+            (trade_date, stock_id, int(api_count), int(db_count), status),
+        )
+    conn.commit()
+
+
 def process_data(df, table, conn):
     if df is None or df.empty:
         return pd.DataFrame()
@@ -34,37 +106,62 @@ def upsert_data(conn, table, df):
     conn.commit()
 
 
-def get_missing_ranges(conn, table_name, stock_id, date_col, target_start):
+def _merge_dates_to_ranges(dates):
+    if not dates:
+        return []
+
+    sorted_dates = sorted(set(dates))
+    ranges = []
+    s = sorted_dates[0]
+    prev = s
+
+    for d in sorted_dates[1:]:
+        if d == prev + timedelta(days=1):
+            prev = d
+            continue
+        ranges.append((s, prev))
+        s = d
+        prev = d
+
+    ranges.append((s, prev))
+    return ranges
+
+
+def get_missing_dates(conn, table_name, stock_id, date_col, target_start):
     available_cols = database.get_table_columns(conn, table_name)
     if not available_cols or date_col not in available_cols:
-        return [(datetime.strptime(target_start, "%Y-%m-%d").date(), datetime.now().date())]
+        return list(pd.date_range(start=target_start, end=datetime.now().date(), freq="B").date)
 
     t_start = datetime.strptime(target_start, "%Y-%m-%d").date()
     t_end = datetime.now().date()
 
     try:
         sql = (
-            f"SELECT MIN({date_col}), MAX({date_col}) "
-            f"FROM {table_name} WHERE stock_id = ? AND {date_col} != ''"
+            f"SELECT DISTINCT substr({date_col}, 1, 10) "
+            f"FROM {table_name} "
+            f"WHERE stock_id = ? AND {date_col} != ''"
         )
-        res = conn.execute(sql, (stock_id,)).fetchone()
-        db_min_str = str(res[0]) if res[0] else None
-        db_max_str = str(res[1]) if res[1] else None
+        exists = {
+            datetime.strptime(str(r[0])[:10], "%Y-%m-%d").date()
+            for r in conn.execute(sql, (stock_id,)).fetchall()
+            if r and r[0]
+        }
     except Exception:
-        return [(t_start, t_end)]
+        return list(pd.date_range(start=t_start, end=t_end, freq="B").date)
 
-    ranges = []
-    if not db_min_str:
-        ranges.append((t_start, t_end))
-    else:
-        db_min = datetime.strptime(db_min_str[:10], "%Y-%m-%d").date()
-        db_max = datetime.strptime(db_max_str[:10], "%Y-%m-%d").date()
-        if t_start < db_min:
-            ranges.append((t_start, db_min - timedelta(days=1)))
-        if t_end > db_max:
-            ranges.append((db_max + timedelta(days=1), t_end))
+    all_dates = pd.date_range(start=t_start, end=t_end, freq="B").date
+    return [d for d in all_dates if d not in exists]
 
-    return ranges
+
+def _filter_dates_by_log(conn, missing_dates, stock_id, api_name):
+    fetch_dates = []
+    for d in missing_dates:
+        d_str = d.strftime("%Y-%m-%d")
+        status = _get_data_ingest_status(conn, stock_id, api_name, d_str)
+        if status in {"Success", "NoTrade"}:
+            continue
+        fetch_dates.append(d)
+    return fetch_dates
 
 
 def start_ingest(st_placeholder=None):
@@ -73,6 +170,7 @@ def start_ingest(st_placeholder=None):
     api = DataLoader()
     api.login_by_token(api_token=cfg["finmind"]["api_token"])
     conn = database.get_db_connection(cfg)
+    _ensure_data_ingest_log_table(conn)
 
     universe = cfg.get("universe", [])
     enabled = cfg.get("datasets", {}).get("enabled", [])
@@ -81,31 +179,15 @@ def start_ingest(st_placeholder=None):
 
     d_map = {
         "ohlcv": ("TaiwanStockPrice", "stock_ohlcv_daily", "date"),
-        "institutional": (
-            "TaiwanStockInstitutionalInvestorsBuySell",
-            "institutional_investors_daily",
-            "date",
-        ),
+        "institutional": ("TaiwanStockInstitutionalInvestorsBuySell", "institutional_investors_daily", "date"),
         "branch": ("TaiwanStockTradingDailyReport", "branch_price_daily", "date"),
         "per_pbr": ("TaiwanStockPER", "stock_per_pbr_daily", "date"),
         "margin_short": ("TaiwanStockMarginPurchaseShortSale", "margin_short_daily", "date"),
         "day_trading": ("TaiwanStockDayTrading", "stock_day_trading_daily", "date"),
-        "holding_shares": (
-            "TaiwanStockHoldingSharesPer",
-            "stock_holding_shares_per_daily",
-            "date",
-        ),
-        "securities_lending": (
-            "TaiwanStockSecuritiesLending",
-            "stock_securities_lending_daily",
-            "date",
-        ),
+        "holding_shares": ("TaiwanStockHoldingSharesPer", "stock_holding_shares_per_daily", "date"),
+        "securities_lending": ("TaiwanStockSecuritiesLending", "stock_securities_lending_daily", "date"),
         "month_revenue": ("TaiwanStockMonthRevenue", "stock_month_revenue_monthly", "date"),
-        "financial_statements": (
-            "TaiwanStockFinancialStatements",
-            "stock_financial_statements",
-            "date",
-        ),
+        "financial_statements": ("TaiwanStockFinancialStatements", "stock_financial_statements", "date"),
         "dividend": ("TaiwanStockDividend", "stock_dividend", "date"),
         "market_value": ("TaiwanStockMarketValue", "stock_market_value_daily", "date"),
         "industry_chain": ("TaiwanStockIndustryChain", "stock_industry_chain", "date"),
@@ -119,37 +201,57 @@ def start_ingest(st_placeholder=None):
     for stock in universe:
         sid = stock["stock_id"]
         log(f"📂 **同步標的: {sid} {stock['name']}**")
+
         for key in enabled:
             if key not in d_map:
                 continue
 
             fm_api, table, d_col = d_map[key]
-            missing_ranges = get_missing_ranges(conn, table, sid, d_col, t_start)
-            if not missing_ranges:
+            missing_dates = get_missing_dates(conn, table, sid, d_col, t_start)
+            fetch_dates = _filter_dates_by_log(conn, missing_dates, sid, key)
+            fetch_ranges = _merge_dates_to_ranges(fetch_dates)
+
+            if not fetch_ranges:
                 continue
 
-            for start, end in missing_ranges:
+            for start, end in fetch_ranges:
                 s_str, e_str = start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
                 try:
                     if key == "branch":
-                        for d_str in pd.date_range(start, end).strftime("%Y-%m-%d"):
+                        for d_str in pd.date_range(start, end, freq="B").strftime("%Y-%m-%d"):
                             df = api.taiwan_stock_trading_daily_report(stock_id=sid, date=d_str)
                             if df is not None and not df.empty:
-                                upsert_data(conn, table, process_data(df, table, conn))
+                                clean_df = process_data(df, table, conn)
+                                upsert_data(conn, table, clean_df)
+                                _write_data_ingest_log(conn, d_str, sid, key, len(df), len(clean_df), "Success")
+                            else:
+                                _write_data_ingest_log(conn, d_str, sid, key, 0, 0, "NoTrade")
                             time.sleep(sleep_sec)
                     else:
-                        df = api.get_data(
-                            dataset=fm_api,
-                            data_id=sid,
-                            start_date=s_str,
-                            end_date=e_str,
-                        )
-                        if df is not None and not df.empty:
-                            upsert_data(conn, table, process_data(df, table, conn))
+                        req_dates = [d.strftime("%Y-%m-%d") for d in pd.date_range(start, end, freq="B")]
+                        df = api.get_data(dataset=fm_api, data_id=sid, start_date=s_str, end_date=e_str)
+                        clean_df = process_data(df, table, conn) if df is not None and not df.empty else pd.DataFrame()
+
+                        if not clean_df.empty:
+                            upsert_data(conn, table, clean_df)
+
+                        existing_by_date = {}
+                        if not clean_df.empty and d_col in clean_df.columns:
+                            date_series = clean_df[d_col].astype(str).str[:10]
+                            for d_str, grp in clean_df.groupby(date_series):
+                                existing_by_date[d_str] = len(grp)
+
+                        for d_str in req_dates:
+                            db_count = existing_by_date.get(d_str, 0)
+                            status = "Success" if db_count > 0 else "NoTrade"
+                            _write_data_ingest_log(conn, d_str, sid, key, db_count, db_count, status)
+
                     log(f"    🚀 [{key}] 同步成功: {s_str} ~ {e_str}")
                 except Exception as e:
                     log(f"    ❌ [{key}] 失敗: {e}")
                     failed_log.append(f"{sid} {key}: {e}")
+                    for d_str in pd.date_range(start, end, freq="B").strftime("%Y-%m-%d"):
+                        _write_data_ingest_log(conn, d_str, sid, key, 0, 0, "Failed")
 
                 time.sleep(sleep_sec)
 
