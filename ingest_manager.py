@@ -118,11 +118,10 @@ def _exclude_weekends(dates):
 def get_pending_dates(conn, stock_id, api_name, target_start, target_end=None, check_freq="B"):
     """依據同步區間 -> 排除已知休市 -> 比對 ingest_log，挑出 Missing/Failed 日期。"""
     t_start = datetime.strptime(target_start, "%Y-%m-%d").date()
-    today = datetime.now().date()
     if target_end:
         t_end = datetime.strptime(target_end, "%Y-%m-%d").date()
     else:
-        t_end = today
+        t_end = datetime.now().date()
 
     candidate_dates = list(pd.date_range(start=t_start, end=t_end, freq=check_freq).date)
     if check_freq == "B":
