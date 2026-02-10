@@ -139,14 +139,15 @@ TABLE_REGISTRY = {
         );""",
     "data_ingest_log": """
         CREATE TABLE IF NOT EXISTS data_ingest_log (
-            date TEXT NOT NULL, 
+            date TEXT NOT NULL,
             stock_id TEXT NOT NULL,
+            api_name TEXT NOT NULL,
             api_count INTEGER DEFAULT 0,
             db_count INTEGER DEFAULT 0,
-            status TEXT,         -- ✅ 增加這行：Success / Failed / NoTrade
+            status TEXT,
             updated_at TEXT,
-            PRIMARY KEY (date, stock_id)
-        );"""    
+            PRIMARY KEY (date, stock_id, api_name)
+        );"""
 }
 
 # 索引配置
@@ -192,6 +193,49 @@ def match_column(available_cols, keywords):
         if all(k.lower() in col.lower() for k in keywords):
             return col
     return None
+
+
+def ensure_data_ingest_log_schema(conn):
+    """確保 data_ingest_log 有完整欄位，並支援以 API 維度紀錄狀態。"""
+    conn.execute(TABLE_REGISTRY["data_ingest_log"])
+    cols = get_table_columns(conn, "data_ingest_log")
+    if not cols:
+        conn.commit()
+        return
+
+    required_cols = ["date", "stock_id", "api_name", "api_count", "db_count", "status", "updated_at"]
+
+    # 若已為新結構僅需補欄位
+    if set(required_cols).issubset(set(cols)):
+        conn.commit()
+        return
+
+    # 舊版主鍵是 (date, stock_id)，需要重建表格主鍵為 (date, stock_id, api_name)
+    conn.execute("ALTER TABLE data_ingest_log RENAME TO data_ingest_log_old")
+    conn.execute(
+        """
+        CREATE TABLE data_ingest_log (
+            date TEXT NOT NULL,
+            stock_id TEXT NOT NULL,
+            api_name TEXT NOT NULL,
+            api_count INTEGER DEFAULT 0,
+            db_count INTEGER DEFAULT 0,
+            status TEXT,
+            updated_at TEXT,
+            PRIMARY KEY (date, stock_id, api_name)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO data_ingest_log(date, stock_id, api_name, api_count, db_count, status, updated_at)
+        SELECT date, stock_id, 'legacy',
+               COALESCE(api_count, 0), COALESCE(db_count, 0), status, updated_at
+        FROM data_ingest_log_old
+        """
+    )
+    conn.execute("DROP TABLE data_ingest_log_old")
+    conn.commit()
 
 # -----------------------------
 # 3. 初始化邏輯
