@@ -99,10 +99,6 @@ def _get_known_holidays(conn, stock_id=None, api_name=None):
     return holidays
 
 
-def _exclude_weekends(dates):
-    return [d for d in dates if d.weekday() < 5]
-
-
 def _resolve_column(conn, table_name, keywords, configured_col=None):
     cols = database.get_table_columns(conn, table_name)
     if not cols:
@@ -121,7 +117,6 @@ def get_pending_dates(conn, stock_id, api_name, target_start, check_freq="B"):
     t_end = datetime.now().date()
 
     candidate_dates = list(pd.date_range(start=t_start, end=t_end, freq=check_freq).date)
-    candidate_dates = _exclude_weekends(candidate_dates)
     if not candidate_dates:
         return []
 

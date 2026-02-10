@@ -98,7 +98,6 @@ def _get_pending_dates_for_minute(conn, stock_id, target_start, target_end, api_
     t_end = datetime.strptime(target_end, "%Y-%m-%d").date()
 
     candidate_dates = list(pd.date_range(start=t_start, end=t_end, freq="B").date)
-    candidate_dates = _exclude_weekends(candidate_dates)
     if not candidate_dates:
         return []
 
