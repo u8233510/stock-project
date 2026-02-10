@@ -146,6 +146,36 @@ def _refresh_branch_weighted_cost_for_trade_date(conn, stock_id, trade_date):
     _upsert_branch_weighted_cost(conn, stock_id, trade_date, avg_cost, total_net_volume, concentration)
 
 
+def _sync_branch_weighted_cost_gaps(conn, stock_id, start_date, end_date=None):
+    """補齊 branch_price_daily 已有但 branch_weighted_cost 缺漏的日期。"""
+    end_date = end_date or datetime.now().strftime("%Y-%m-%d")
+    rows = conn.execute(
+        """
+        SELECT DISTINCT b.date
+        FROM branch_price_daily b
+        LEFT JOIN branch_weighted_cost w
+          ON w.stock_id = b.stock_id
+         AND w.start_date = b.date
+         AND w.end_date = b.date
+        WHERE b.stock_id = ?
+          AND b.date >= ?
+          AND b.date <= ?
+          AND w.stock_id IS NULL
+        ORDER BY b.date
+        """,
+        (stock_id, start_date, end_date),
+    ).fetchall()
+
+    missing_dates = [str(r[0])[:10] for r in rows if r and r[0]]
+    for trade_date in missing_dates:
+        _refresh_branch_weighted_cost_for_trade_date(conn, stock_id, trade_date)
+    return missing_dates
+
+
+# backward compatibility for older call-sites
+_sync_missing_branch_weighted_cost = _sync_branch_weighted_cost_gaps
+
+
 def _merge_dates_to_ranges(dates):
     if not dates:
         return []
@@ -329,7 +359,7 @@ def start_ingest(st_placeholder=None):
             )
 
             if key == "branch":
-                _sync_missing_branch_weighted_cost(conn, sid, t_start, t_end)
+                _sync_branch_weighted_cost_gaps(conn, sid, t_start, t_end)
 
             if not pending_dates:
                 continue
