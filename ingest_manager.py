@@ -58,6 +58,71 @@ def upsert_data(conn, table, df):
     conn.commit()
 
 
+def _compute_branch_weighted_cost_from_daily_df(df):
+    """從單日 branch 明細計算加權成本中繼指標。"""
+    if df is None or df.empty:
+        return 0.0, 0, 0.0
+
+    work = df.copy()
+    for col in ["buy", "sell", "price"]:
+        if col not in work.columns:
+            return 0.0, 0, 0.0
+
+    work["buy"] = pd.to_numeric(work["buy"], errors="coerce").fillna(0)
+    work["sell"] = pd.to_numeric(work["sell"], errors="coerce").fillna(0)
+    work["price"] = pd.to_numeric(work["price"], errors="coerce")
+    work = work.dropna(subset=["price"])
+    if work.empty:
+        return 0.0, 0, 0.0
+
+    work["net"] = work["buy"] - work["sell"]
+    total_vol = float(work["buy"].sum())
+    total_net_volume = int(work["net"].sum())
+
+    grouped = work.groupby("securities_trader", dropna=False, as_index=False).agg(net=("net", "sum"))
+
+    weighted_vals = (work["net"] * work["price"]).groupby(work["securities_trader"], dropna=False).sum()
+    net_vals = work["net"].groupby(work["securities_trader"], dropna=False).sum()
+
+    avg_map = {}
+    for k, net in net_vals.items():
+        if net != 0:
+            avg_map[k] = float(round(weighted_vals.get(k, 0.0) / net, 2))
+
+    grouped["avg_price"] = grouped["securities_trader"].map(avg_map)
+    grouped = grouped[(grouped["net"] > 0) & grouped["avg_price"].notna()]
+    grouped = grouped.sort_values("net", ascending=False).head(5)
+
+    if grouped.empty:
+        return 0.0, total_net_volume, 0.0
+
+    total_net_buy = float(grouped["net"].sum())
+    weighted_sum = float((grouped["net"] * grouped["avg_price"]).sum())
+    avg_cost = round(weighted_sum / total_net_buy, 2) if total_net_buy > 0 else 0.0
+    concentration = round((total_net_buy / total_vol) * 100, 2) if total_vol > 0 else 0.0
+    return avg_cost, total_net_volume, concentration
+
+
+def _upsert_branch_weighted_cost(conn, stock_id, trade_date, avg_cost, total_net_volume, concentration):
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO branch_weighted_cost(
+            stock_id, start_date, end_date, avg_cost, total_net_volume, concentration
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            stock_id,
+            trade_date,
+            trade_date,
+            float(avg_cost or 0),
+            int(total_net_volume or 0),
+            float(concentration or 0),
+        ),
+    )
+    conn.commit()
+
+
 def _merge_dates_to_ranges(dates):
     if not dates:
         return []
@@ -171,6 +236,8 @@ def start_ingest(st_placeholder=None):
     api.login_by_token(api_token=cfg["finmind"]["api_token"])
     conn = database.get_db_connection(cfg)
     _ensure_data_ingest_log_table(conn)
+    conn.execute(database.TABLE_REGISTRY["branch_weighted_cost"])
+    conn.commit()
 
     universe = cfg.get("universe", [])
     enabled = cfg.get("datasets", {}).get("enabled", [])
@@ -267,6 +334,16 @@ def start_ingest(st_placeholder=None):
                     if df is not None and not df.empty:
                         clean_df = process_data(df, table, conn)
                         upsert_data(conn, table, clean_df)
+                        if key == "branch":
+                            avg_cost, total_net_volume, concentration = _compute_branch_weighted_cost_from_daily_df(clean_df)
+                            _upsert_branch_weighted_cost(
+                                conn,
+                                sid,
+                                d_str,
+                                avg_cost,
+                                total_net_volume,
+                                concentration,
+                            )
                         if resolved_date_col in clean_df.columns:
                             db_count = int((clean_df[resolved_date_col].astype(str).str[:10] == d_str).sum())
                         else:
