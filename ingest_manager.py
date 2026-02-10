@@ -327,6 +327,10 @@ def start_ingest(st_placeholder=None):
                 target_end=t_end,
                 check_freq=check_freq,
             )
+
+            if key == "branch":
+                _sync_missing_branch_weighted_cost(conn, sid, t_start, t_end)
+
             if not pending_dates:
                 continue
 
