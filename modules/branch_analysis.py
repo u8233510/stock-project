@@ -6,6 +6,26 @@ import json
 import requests
 import plotly.graph_objects as go
 
+
+def _upsert_branch_weighted_cost(conn, sid, start_d, end_d, avg_cost, total_net_volume, concentration):
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO branch_weighted_cost(
+            stock_id, start_date, end_date, avg_cost, total_net_volume, concentration
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            sid,
+            str(start_d),
+            str(end_d),
+            float(avg_cost or 0),
+            int(total_net_volume or 0),
+            float(concentration or 0),
+        ),
+    )
+    conn.commit()
+
 def _call_nim(cfg, messages, temperature=0.0, max_tokens=2000):
     llm_cfg = cfg.get("llm", {})
     url = "https://integrate.api.nvidia.com/v1/chat/completions"
@@ -92,6 +112,7 @@ def show_branch_analysis():
         df['獲利%'] = (((current_price - df['均價']) / df['均價']) * 100).round(2)
 
         df_top_buyers = df[df['淨張數'] > 0].head(5)
+        total_net_volume = int(df['淨張數'].sum()) if not df.empty else 0
         main_force_cost = 0
         chip_concentration = 0
         if not df_top_buyers.empty:
@@ -99,6 +120,17 @@ def show_branch_analysis():
             weighted_sum = (df_top_buyers['淨張數'] * df_top_buyers['均價']).sum()
             main_force_cost = round(weighted_sum / total_net_buy, 2)
             chip_concentration = round((total_net_buy / total_vol) * 100, 2)
+
+        # 將分析結果回寫至中間表，供「分點加權成本 (分析用)」查詢
+        _upsert_branch_weighted_cost(
+            conn,
+            sid,
+            start_d,
+            end_d,
+            main_force_cost,
+            total_net_volume,
+            chip_concentration,
+        )
 
         m1, m2, m3 = st.columns(3)
         with m1: st.metric("核心主力加權成本", f"${main_force_cost}")
