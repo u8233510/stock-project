@@ -6,6 +6,7 @@ import json
 import requests
 import plotly.graph_objects as go
 
+
 def _call_nim(cfg, messages, temperature=0.0, max_tokens=2000):
     llm_cfg = cfg.get("llm", {})
     url = "https://integrate.api.nvidia.com/v1/chat/completions"
@@ -99,6 +100,7 @@ def show_branch_analysis():
             weighted_sum = (df_top_buyers['淨張數'] * df_top_buyers['均價']).sum()
             main_force_cost = round(weighted_sum / total_net_buy, 2)
             chip_concentration = round((total_net_buy / total_vol) * 100, 2)
+
 
         m1, m2, m3 = st.columns(3)
         with m1: st.metric("核心主力加權成本", f"${main_force_cost}")
