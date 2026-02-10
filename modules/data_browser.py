@@ -44,7 +44,12 @@ def show_data_browser():
 
     # ✅ 關鍵優化：使用 database.py 內建功能自動偵測欄位
     cols = database.get_table_columns(conn, selected_table_en)
-    time_col = database.match_column(cols, ["date"])
+    time_col = (
+        database.match_column(cols, ["date_time"])
+        or database.match_column(cols, ["datetime"])
+        or database.match_column(cols, ["timestamp"])
+        or database.match_column(cols, ["date"])
+    )
 
     with c4:
         # 排序欄位預設對齊偵測到的時間欄位
@@ -58,12 +63,25 @@ def show_data_browser():
         rows_per_page = st.selectbox("每頁筆數", [10, 20, 50, 100], index=2)
 
     # 3. 建立 SQL 查詢語句 (使用動態偵測的時間欄位)
-    where_clause = f"WHERE stock_id = '{target_sid}'"
-    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
-        where_clause += f" AND {time_col} BETWEEN '{date_range[0]}' AND '{date_range[1]}'"
+    where_clause = "WHERE stock_id = ?"
+    query_params = [target_sid]
+    if isinstance(date_range, (list, tuple)) and len(date_range) == 2 and time_col:
+        start_day = pd.to_datetime(date_range[0]).date()
+        end_day = pd.to_datetime(date_range[1]).date()
+
+        # 分鐘級資料通常為 datetime 字串，改用整日邊界比對，
+        # 可避免 date() 解析格式差異造成 2/10 這類資料被漏掉。
+        if any(key in time_col.lower() for key in ["time", "datetime", "timestamp"]):
+            start_dt = f"{start_day.isoformat()} 00:00:00"
+            end_dt_exclusive = f"{(end_day + pd.Timedelta(days=1)).isoformat()} 00:00:00"
+            where_clause += f" AND {time_col} >= ? AND {time_col} < ?"
+            query_params.extend([start_dt, end_dt_exclusive])
+        else:
+            where_clause += f" AND {time_col} BETWEEN ? AND ?"
+            query_params.extend([start_day.isoformat(), end_day.isoformat()])
     
     count_query = f"SELECT COUNT(*) FROM {selected_table_en} {where_clause}"
-    total_rows = conn.execute(count_query).fetchone()[0]
+    total_rows = conn.execute(count_query, query_params).fetchone()[0]
     total_pages = math.ceil(total_rows / rows_per_page) if total_rows > 0 else 1
 
     # 4. 資料顯示與分頁
@@ -72,7 +90,7 @@ def show_data_browser():
         offset = (page - 1) * rows_per_page
         
         query = f"SELECT * FROM {selected_table_en} {where_clause} ORDER BY {sort_col} {order_sql} LIMIT {rows_per_page} OFFSET {offset}"
-        df = pd.read_sql(query, conn)
+        df = pd.read_sql(query, conn, params=query_params)
         
         st.dataframe(df, use_container_width=True, hide_index=True)
         
