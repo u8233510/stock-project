@@ -56,6 +56,30 @@ def _exclude_weekends(dates):
     return [d for d in dates if d.weekday() < 5]
 
 
+def _normalize_to_date_str(series):
+    if series is None:
+        return pd.Series(dtype="string")
+    normalized = pd.to_datetime(series, errors="coerce")
+    return normalized.dt.strftime("%Y-%m-%d")
+
+
+def _filter_df_by_trade_date(df, trade_date):
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    date_like_cols = [c for c in df.columns if "date" in str(c).lower()]
+    if not date_like_cols:
+        return df
+
+    for col in date_like_cols:
+        normalized = _normalize_to_date_str(df[col])
+        matched = df[normalized == trade_date]
+        if not matched.empty:
+            return matched
+
+    return pd.DataFrame(columns=df.columns)
+
+
 def _merge_dates_to_ranges(dates):
     if not dates:
         return []
@@ -221,7 +245,10 @@ def run_minute_task(cfg):
             p_text.warning(f"🔍 偵測到分鐘級缺口：{d} | {sid}...")
             try:
                 df_tick = dl.taiwan_stock_tick(stock_id=sid, date=d)
-                if df_tick is not None and not df_tick.empty:
+                api_count = 0 if df_tick is None else len(df_tick)
+                df_tick = _filter_df_by_trade_date(df_tick, d)
+
+                if not df_tick.empty:
                     df_tick["date_time"] = pd.to_datetime(df_tick["date"] + " " + df_tick["Time"])
                     df_tick = df_tick.set_index("date_time")
 
@@ -261,10 +288,10 @@ def run_minute_task(cfg):
                         daily_flow.to_sql("stock_active_flow_daily", conn, if_exists="append", index=False)
 
                     p_text.success(f"🚀 {d} | {sid} 補洞完成")
-                    _write_data_ingest_log(conn, d, sid, MINUTE_API_NAME, len(df_tick), len(df_min), "Success")
+                    _write_data_ingest_log(conn, d, sid, MINUTE_API_NAME, api_count, len(df_min), "Success")
                 else:
                     p_text.info(f"⚠️ {d} | {sid} 無逐筆資料 (可能是休市)")
-                    _write_data_ingest_log(conn, d, sid, MINUTE_API_NAME, 0, 0, "NoTrade")
+                    _write_data_ingest_log(conn, d, sid, MINUTE_API_NAME, api_count, 0, "NoTrade")
 
                 p_bar.progress(min(count / total, 1.0))
                 time.sleep(cfg.get("ingest", {}).get("sleep_seconds", 0.3))
