@@ -6,6 +6,7 @@ from FinMind.data import DataLoader
 import streamlit as st
 
 import database
+from ingest_log_utils import ensure_data_ingest_log_table, get_data_ingest_status, write_data_ingest_log
 
 
 def _ensure_data_ingest_log_table(conn):
@@ -57,6 +58,8 @@ def run_minute_task(cfg):
     _ensure_data_ingest_log_table(conn)
     min_cols = database.get_table_columns(conn, "stock_ohlcv_minute")
     time_col = database.match_column(min_cols, ["date"]) or "date_time"
+
+    api_name = "minute"
 
     for d in date_range:
         if pd.to_datetime(d).weekday() >= 5:

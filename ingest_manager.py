@@ -5,6 +5,7 @@ import pandas as pd
 from FinMind.data import DataLoader
 
 import database
+from ingest_log_utils import ensure_data_ingest_log_table, get_data_ingest_status, write_data_ingest_log
 
 
 def _ensure_data_ingest_log_table(conn):
@@ -82,7 +83,7 @@ def _merge_dates_to_ranges(dates):
 def get_missing_ranges(conn, table_name, stock_id, date_col, target_start, rolling_recheck_days=1):
     available_cols = database.get_table_columns(conn, table_name)
     if not available_cols or date_col not in available_cols:
-        return [(datetime.strptime(target_start, "%Y-%m-%d").date(), datetime.now().date())]
+        return list(pd.date_range(start=target_start, end=datetime.now().date(), freq="B").date)
 
     t_start = datetime.strptime(target_start, "%Y-%m-%d").date()
     t_end = datetime.now().date()
@@ -99,7 +100,7 @@ def get_missing_ranges(conn, table_name, stock_id, date_col, target_start, rolli
             if r and r[0]
         }
     except Exception:
-        return [(t_start, t_end)]
+        return list(pd.date_range(start=t_start, end=t_end, freq="B").date)
 
     # 只針對平日做補洞，避免每次都重查週末造成不必要 API 成本。
     all_dates = pd.date_range(start=t_start, end=t_end, freq="B").date
@@ -131,31 +132,15 @@ def start_ingest(st_placeholder=None):
 
     d_map = {
         "ohlcv": ("TaiwanStockPrice", "stock_ohlcv_daily", "date"),
-        "institutional": (
-            "TaiwanStockInstitutionalInvestorsBuySell",
-            "institutional_investors_daily",
-            "date",
-        ),
+        "institutional": ("TaiwanStockInstitutionalInvestorsBuySell", "institutional_investors_daily", "date"),
         "branch": ("TaiwanStockTradingDailyReport", "branch_price_daily", "date"),
         "per_pbr": ("TaiwanStockPER", "stock_per_pbr_daily", "date"),
         "margin_short": ("TaiwanStockMarginPurchaseShortSale", "margin_short_daily", "date"),
         "day_trading": ("TaiwanStockDayTrading", "stock_day_trading_daily", "date"),
-        "holding_shares": (
-            "TaiwanStockHoldingSharesPer",
-            "stock_holding_shares_per_daily",
-            "date",
-        ),
-        "securities_lending": (
-            "TaiwanStockSecuritiesLending",
-            "stock_securities_lending_daily",
-            "date",
-        ),
+        "holding_shares": ("TaiwanStockHoldingSharesPer", "stock_holding_shares_per_daily", "date"),
+        "securities_lending": ("TaiwanStockSecuritiesLending", "stock_securities_lending_daily", "date"),
         "month_revenue": ("TaiwanStockMonthRevenue", "stock_month_revenue_monthly", "date"),
-        "financial_statements": (
-            "TaiwanStockFinancialStatements",
-            "stock_financial_statements",
-            "date",
-        ),
+        "financial_statements": ("TaiwanStockFinancialStatements", "stock_financial_statements", "date"),
         "dividend": ("TaiwanStockDividend", "stock_dividend", "date"),
         "market_value": ("TaiwanStockMarketValue", "stock_market_value_daily", "date"),
         "industry_chain": ("TaiwanStockIndustryChain", "stock_industry_chain", "date"),
@@ -169,6 +154,7 @@ def start_ingest(st_placeholder=None):
     for stock in universe:
         sid = stock["stock_id"]
         log(f"📂 **同步標的: {sid} {stock['name']}**")
+
         for key in enabled:
             if key not in d_map:
                 continue
@@ -185,7 +171,7 @@ def start_ingest(st_placeholder=None):
             if not missing_ranges:
                 continue
 
-            for start, end in missing_ranges:
+            for start, end in fetch_ranges:
                 s_str, e_str = start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
                 try:
                     if key == "branch":
@@ -216,6 +202,8 @@ def start_ingest(st_placeholder=None):
                 except Exception as e:
                     log(f"    ❌ [{key}] 失敗: {e}")
                     failed_log.append(f"{sid} {key}: {e}")
+                    for d_str in pd.date_range(start, end, freq="B").strftime("%Y-%m-%d"):
+                        write_data_ingest_log(conn, d_str, sid, key, 0, 0, "Failed")
 
                 time.sleep(sleep_sec)
 
