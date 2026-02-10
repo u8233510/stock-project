@@ -99,6 +99,8 @@ def _get_known_holidays(conn, stock_id=None, api_name=None):
     return holidays
 
 
+def _exclude_weekends(dates):
+    return [d for d in dates if d.weekday() < 5]
 
 
 def _resolve_column(conn, table_name, keywords, configured_col=None):
@@ -112,42 +114,46 @@ def _resolve_column(conn, table_name, keywords, configured_col=None):
     matched = database.match_column(cols, keywords)
     return matched or configured_col
 
-def get_missing_ranges(
-    conn,
-    table_name,
-    stock_id,
-    stock_col,
-    date_col,
-    target_start,
-    api_name=None,
-):
-    available_cols = database.get_table_columns(conn, table_name)
+
+def get_pending_dates(conn, stock_id, api_name, target_start, check_freq="B"):
+    """依據同步區間 -> 排除已知休市 -> 比對 ingest_log，挑出 Missing/Failed 日期。"""
     t_start = datetime.strptime(target_start, "%Y-%m-%d").date()
     t_end = datetime.now().date()
 
-    if not available_cols or date_col not in available_cols or stock_col not in available_cols:
-        return [(t_start, t_end)]
+    candidate_dates = list(pd.date_range(start=t_start, end=t_end, freq=check_freq).date)
+    candidate_dates = _exclude_weekends(candidate_dates)
+    if not candidate_dates:
+        return []
 
-    try:
-        sql = (
-            f"SELECT DISTINCT substr({date_col}, 1, 10) "
-            f"FROM {table_name} "
-            f"WHERE {stock_col} = ? AND {date_col} != ''"
-        )
-        exists = {
-            datetime.strptime(str(r[0])[:10], "%Y-%m-%d").date()
-            for r in conn.execute(sql, (stock_id,)).fetchall()
-            if r and r[0]
-        }
-    except Exception:
-        return [(t_start, t_end)]
+    holidays = _get_known_holidays(conn, stock_id=stock_id, api_name=api_name)
+    candidate_dates = [d for d in candidate_dates if d not in holidays]
+    if not candidate_dates:
+        return []
 
-    business_dates = pd.date_range(start=t_start, end=t_end, freq="B").date
-    holiday_dates = _get_known_holidays(conn, stock_id=stock_id, api_name=api_name)
-    target_dates = [d for d in business_dates if d not in holiday_dates]
-    missing_dates = [d for d in target_dates if d not in exists]
+    min_date = candidate_dates[0].strftime("%Y-%m-%d")
+    max_date = candidate_dates[-1].strftime("%Y-%m-%d")
 
-    return _merge_dates_to_ranges(missing_dates)
+    rows = conn.execute(
+        """
+        SELECT date, status
+        FROM data_ingest_log
+        WHERE stock_id = ?
+          AND api_name = ?
+          AND date >= ?
+          AND date <= ?
+        """,
+        (stock_id, api_name, min_date, max_date),
+    ).fetchall()
+
+    status_map = {str(d)[:10]: s for d, s in rows if d}
+    pending_dates = []
+    for d in candidate_dates:
+        d_str = d.strftime("%Y-%m-%d")
+        if status_map.get(d_str) in {"Success", "NoTrade"}:
+            continue
+        pending_dates.append(d)
+
+    return pending_dates
 
 
 def start_ingest(st_placeholder=None):
@@ -164,35 +170,39 @@ def start_ingest(st_placeholder=None):
     sleep_sec = float(cfg.get("ingest", {}).get("sleep_seconds", 0.3))
 
     d_map = {
-        "ohlcv": ("TaiwanStockPrice", "stock_ohlcv_daily", "date"),
+        "ohlcv": ("TaiwanStockPrice", "stock_ohlcv_daily", "date", "B"),
         "institutional": (
             "TaiwanStockInstitutionalInvestorsBuySell",
             "institutional_investors_daily",
             "date",
+            "B",
         ),
-        "branch": ("TaiwanStockTradingDailyReport", "branch_price_daily", "date"),
-        "per_pbr": ("TaiwanStockPER", "stock_per_pbr_daily", "date"),
-        "margin_short": ("TaiwanStockMarginPurchaseShortSale", "margin_short_daily", "date"),
-        "day_trading": ("TaiwanStockDayTrading", "stock_day_trading_daily", "date"),
+        "branch": ("TaiwanStockTradingDailyReport", "branch_price_daily", "date", "B"),
+        "per_pbr": ("TaiwanStockPER", "stock_per_pbr_daily", "date", "B"),
+        "margin_short": ("TaiwanStockMarginPurchaseShortSale", "margin_short_daily", "date", "B"),
+        "day_trading": ("TaiwanStockDayTrading", "stock_day_trading_daily", "date", "B"),
         "holding_shares": (
             "TaiwanStockHoldingSharesPer",
             "stock_holding_shares_per_daily",
             "date",
+            "W-THU",
         ),
         "securities_lending": (
             "TaiwanStockSecuritiesLending",
             "stock_securities_lending_daily",
             "date",
+            "B",
         ),
-        "month_revenue": ("TaiwanStockMonthRevenue", "stock_month_revenue_monthly", "date"),
+        "month_revenue": ("TaiwanStockMonthRevenue", "stock_month_revenue_monthly", "date", "MS"),
         "financial_statements": (
             "TaiwanStockFinancialStatements",
             "stock_financial_statements",
             "date",
+            "QS",
         ),
-        "dividend": ("TaiwanStockDividend", "stock_dividend", "date"),
-        "market_value": ("TaiwanStockMarketValue", "stock_market_value_daily", "date"),
-        "industry_chain": ("TaiwanStockIndustryChain", "stock_industry_chain", "date"),
+        "dividend": ("TaiwanStockDividend", "stock_dividend", "date", "YS"),
+        "market_value": ("TaiwanStockMarketValue", "stock_market_value_daily", "date", "B"),
+        "industry_chain": ("TaiwanStockIndustryChain", "stock_industry_chain", "date", "MS"),
     }
 
     def log(msg):
@@ -207,67 +217,59 @@ def start_ingest(st_placeholder=None):
             if key not in d_map:
                 continue
 
-            fm_api, table, d_col = d_map[key]
+            fm_api, table, d_col, check_freq = d_map[key]
             resolved_date_col = _resolve_column(conn, table, ["date"], configured_col=d_col)
-            resolved_stock_col = _resolve_column(conn, table, ["stock", "id"], configured_col="stock_id")
-            missing_ranges = get_missing_ranges(
+
+            pending_dates = get_pending_dates(
                 conn,
-                table,
                 sid,
-                resolved_stock_col,
-                resolved_date_col,
+                fm_api,
                 t_start,
-                api_name=fm_api,
+                check_freq=check_freq,
             )
-            if not missing_ranges:
+            if not pending_dates:
                 continue
 
-            for start, end in missing_ranges:
-                s_str, e_str = start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
-                try:
+            pending_ranges = _merge_dates_to_ranges(pending_dates)
+            ranges_txt = ", ".join(
+                [f"{s.strftime('%Y-%m-%d')}~{e.strftime('%Y-%m-%d')}" for s, e in pending_ranges]
+            )
+
+            try:
+                for d_str in [d.strftime("%Y-%m-%d") for d in pending_dates]:
+                    status = _get_data_ingest_status(conn, sid, d_str, fm_api)
+                    if status in {"Success", "NoTrade"}:
+                        continue
+
                     if key == "branch":
-                        for d_str in pd.date_range(start, end, freq="B").strftime("%Y-%m-%d"):
-                            status = _get_data_ingest_status(conn, sid, d_str, fm_api)
-                            if status in {"Success", "NoTrade"}:
-                                continue
-                            df = api.taiwan_stock_trading_daily_report(stock_id=sid, date=d_str)
-                            if df is not None and not df.empty:
-                                clean_df = process_data(df, table, conn)
-                                upsert_data(conn, table, clean_df)
-                                _write_data_ingest_log(conn, d_str, sid, fm_api, len(df), len(clean_df), "Success")
-                            else:
-                                _write_data_ingest_log(conn, d_str, sid, fm_api, 0, 0, "NoTrade")
-                            time.sleep(sleep_sec)
+                        df = api.taiwan_stock_trading_daily_report(stock_id=sid, date=d_str)
                     else:
-                        # 逐日檢查 ingest log，只有無紀錄或 Failed 才送 API
-                        for d_str in pd.date_range(start, end, freq="B").strftime("%Y-%m-%d"):
-                            status = _get_data_ingest_status(conn, sid, d_str, fm_api)
-                            if status in {"Success", "NoTrade"}:
-                                continue
+                        df = api.get_data(
+                            dataset=fm_api,
+                            data_id=sid,
+                            start_date=d_str,
+                            end_date=d_str,
+                        )
 
-                            df = api.get_data(
-                                dataset=fm_api,
-                                data_id=sid,
-                                start_date=d_str,
-                                end_date=d_str,
-                            )
-                            if df is not None and not df.empty:
-                                clean_df = process_data(df, table, conn)
-                                upsert_data(conn, table, clean_df)
-                                if resolved_date_col in clean_df.columns:
-                                    db_count = int((clean_df[resolved_date_col].astype(str).str[:10] == d_str).sum())
-                                else:
-                                    db_count = len(clean_df)
-                                _write_data_ingest_log(conn, d_str, sid, fm_api, len(df), db_count, "Success")
-                            else:
-                                _write_data_ingest_log(conn, d_str, sid, fm_api, 0, 0, "NoTrade")
-                            time.sleep(sleep_sec)
-                    log(f"    🚀 [{key}] 同步成功: {s_str} ~ {e_str}")
-                except Exception as e:
-                    log(f"    ❌ [{key}] 失敗: {e}")
-                    failed_log.append(f"{sid} {key}: {e}")
+                    if df is not None and not df.empty:
+                        clean_df = process_data(df, table, conn)
+                        upsert_data(conn, table, clean_df)
+                        if resolved_date_col in clean_df.columns:
+                            db_count = int((clean_df[resolved_date_col].astype(str).str[:10] == d_str).sum())
+                        else:
+                            db_count = len(clean_df)
+                        _write_data_ingest_log(conn, d_str, sid, fm_api, len(df), db_count, "Success")
+                    else:
+                        _write_data_ingest_log(conn, d_str, sid, fm_api, 0, 0, "NoTrade")
 
-                time.sleep(sleep_sec)
+                    time.sleep(sleep_sec)
+
+                log(f"    🚀 [{key}] 同步成功: {ranges_txt}")
+            except Exception as e:
+                log(f"    ❌ [{key}] 失敗: {e}")
+                failed_log.append(f"{sid} {key}: {e}")
+
+            time.sleep(sleep_sec)
 
     conn.close()
     return failed_log
