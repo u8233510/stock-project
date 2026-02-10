@@ -123,6 +123,29 @@ def _upsert_branch_weighted_cost(conn, stock_id, trade_date, avg_cost, total_net
     conn.commit()
 
 
+def _refresh_branch_weighted_cost_for_trade_date(conn, stock_id, trade_date):
+    """每次寫入 branch_price_daily 後，直接以當日資料重算 branch_weighted_cost。"""
+    day_df = pd.read_sql(
+        """
+        SELECT securities_trader, buy, sell, price
+        FROM branch_price_daily
+        WHERE stock_id = ? AND date = ?
+        """,
+        conn,
+        params=(stock_id, trade_date),
+    )
+    if day_df.empty:
+        conn.execute(
+            "DELETE FROM branch_weighted_cost WHERE stock_id = ? AND start_date = ? AND end_date = ?",
+            (stock_id, trade_date, trade_date),
+        )
+        conn.commit()
+        return
+
+    avg_cost, total_net_volume, concentration = _compute_branch_weighted_cost_from_daily_df(day_df)
+    _upsert_branch_weighted_cost(conn, stock_id, trade_date, avg_cost, total_net_volume, concentration)
+
+
 def _merge_dates_to_ranges(dates):
     if not dates:
         return []
@@ -335,15 +358,7 @@ def start_ingest(st_placeholder=None):
                         clean_df = process_data(df, table, conn)
                         upsert_data(conn, table, clean_df)
                         if key == "branch":
-                            avg_cost, total_net_volume, concentration = _compute_branch_weighted_cost_from_daily_df(clean_df)
-                            _upsert_branch_weighted_cost(
-                                conn,
-                                sid,
-                                d_str,
-                                avg_cost,
-                                total_net_volume,
-                                concentration,
-                            )
+                            _refresh_branch_weighted_cost_for_trade_date(conn, sid, d_str)
                         if resolved_date_col in clean_df.columns:
                             db_count = int((clean_df[resolved_date_col].astype(str).str[:10] == d_str).sum())
                         else:
