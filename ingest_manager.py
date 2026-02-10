@@ -172,8 +172,9 @@ def _sync_branch_weighted_cost_gaps(conn, stock_id, start_date, end_date=None):
     return missing_dates
 
 
-# backward compatibility for older call-sites
-_sync_missing_branch_weighted_cost = _sync_branch_weighted_cost_gaps
+def _sync_missing_branch_weighted_cost(conn, stock_id, start_date, end_date=None):
+    """Backward-compatible wrapper for older call-sites."""
+    return _sync_branch_weighted_cost_gaps(conn, stock_id, start_date, end_date)
 
 
 def _merge_dates_to_ranges(dates):
