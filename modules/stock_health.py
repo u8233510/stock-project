@@ -57,10 +57,21 @@ def show_stock_health():
         s_bal = database.match_column(m_cols, ["Short", "Balance"])
         d_vol = database.match_column(d_cols, ["Volume"])
 
+        foreign_cond = " OR ".join([
+            "i.name LIKE '%外資%'",
+            "lower(i.name) LIKE '%foreign%'",
+            "lower(i.name) LIKE '%fii%'"
+        ])
+        trust_cond = " OR ".join([
+            "i.name LIKE '%投信%'",
+            "lower(i.name) LIKE '%investment_trust%'",
+            "lower(i.name) LIKE '%investment trust%'"
+        ])
+
         query = f"""
             SELECT o.date AS "日期", o.close AS "收盤", o.Trading_Volume AS "成交量",
-                   SUM(CASE WHEN i.name LIKE '%外資%' THEN i.buy - i.sell ELSE 0 END) AS "外資",
-                   SUM(CASE WHEN i.name LIKE '%投信%' THEN i.buy - i.sell ELSE 0 END) AS "投信",
+                   SUM(CASE WHEN ({foreign_cond}) THEN i.buy - i.sell ELSE 0 END) AS "外資",
+                   SUM(CASE WHEN ({trust_cond}) THEN i.buy - i.sell ELSE 0 END) AS "投信",
                    MAX(m."{m_bal}") AS "融資", MAX(m."{s_bal}") AS "融券",
                    MAX(d."{d_vol}") AS "當沖量",
                    MAX(f.active_buy_vol) AS "主動買", MAX(f.active_sell_vol) AS "主動賣"
