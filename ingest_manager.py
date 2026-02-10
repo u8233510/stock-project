@@ -79,9 +79,17 @@ def _merge_dates_to_ranges(dates):
     return ranges
 
 
-def _get_known_holidays(conn):
+def _get_known_holidays(conn, stock_id=None, api_name=None):
     sql = "SELECT DISTINCT date FROM data_ingest_log WHERE status = 'NoTrade'"
-    rows = conn.execute(sql).fetchall()
+    params = []
+    if stock_id is not None:
+        sql += " AND stock_id = ?"
+        params.append(stock_id)
+    if api_name is not None:
+        sql += " AND api_name = ?"
+        params.append(api_name)
+
+    rows = conn.execute(sql, params).fetchall()
     holidays = set()
     for row in rows:
         try:
@@ -104,7 +112,15 @@ def _resolve_column(conn, table_name, keywords, configured_col=None):
     matched = database.match_column(cols, keywords)
     return matched or configured_col
 
-def get_missing_ranges(conn, table_name, stock_id, stock_col, date_col, target_start, rolling_recheck_days=1):
+def get_missing_ranges(
+    conn,
+    table_name,
+    stock_id,
+    stock_col,
+    date_col,
+    target_start,
+    api_name=None,
+):
     available_cols = database.get_table_columns(conn, table_name)
     t_start = datetime.strptime(target_start, "%Y-%m-%d").date()
     t_end = datetime.now().date()
@@ -127,19 +143,9 @@ def get_missing_ranges(conn, table_name, stock_id, stock_col, date_col, target_s
         return [(t_start, t_end)]
 
     business_dates = pd.date_range(start=t_start, end=t_end, freq="B").date
-    holiday_dates = _get_known_holidays(conn)
+    holiday_dates = _get_known_holidays(conn, stock_id=stock_id, api_name=api_name)
     target_dates = [d for d in business_dates if d not in holiday_dates]
     missing_dates = [d for d in target_dates if d not in exists]
-
-    recheck_days = max(int(rolling_recheck_days or 0), 0)
-    if recheck_days > 0:
-        recheck_start = max(t_start, t_end - timedelta(days=recheck_days - 1))
-        rolling_dates = [
-            d
-            for d in pd.date_range(start=recheck_start, end=t_end, freq="B").date
-            if d not in holiday_dates
-        ]
-        missing_dates.extend(rolling_dates)
 
     return _merge_dates_to_ranges(missing_dates)
 
@@ -156,7 +162,6 @@ def start_ingest(st_placeholder=None):
     enabled = cfg.get("datasets", {}).get("enabled", [])
     t_start = cfg["ingest_master"]["start_date"]
     sleep_sec = float(cfg.get("ingest", {}).get("sleep_seconds", 0.3))
-    rolling_recheck_days = int(cfg.get("ingest", {}).get("rolling_recheck_days", 1))
 
     d_map = {
         "ohlcv": ("TaiwanStockPrice", "stock_ohlcv_daily", "date"),
@@ -212,7 +217,7 @@ def start_ingest(st_placeholder=None):
                 resolved_stock_col,
                 resolved_date_col,
                 t_start,
-                rolling_recheck_days=rolling_recheck_days,
+                api_name=fm_api,
             )
             if not missing_ranges:
                 continue
