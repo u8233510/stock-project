@@ -111,12 +111,21 @@ def _resolve_column(conn, table_name, keywords, configured_col=None):
     return matched or configured_col
 
 
-def get_pending_dates(conn, stock_id, api_name, target_start, check_freq="B"):
+def _exclude_weekends(dates):
+    return [d for d in dates if d.weekday() < 5]
+
+
+def get_pending_dates(conn, stock_id, api_name, target_start, target_end=None, check_freq="B"):
     """依據同步區間 -> 排除已知休市 -> 比對 ingest_log，挑出 Missing/Failed 日期。"""
     t_start = datetime.strptime(target_start, "%Y-%m-%d").date()
-    t_end = datetime.now().date()
+    if target_end:
+        t_end = datetime.strptime(target_end, "%Y-%m-%d").date()
+    else:
+        t_end = datetime.now().date()
 
     candidate_dates = list(pd.date_range(start=t_start, end=t_end, freq=check_freq).date)
+    if check_freq == "B":
+        candidate_dates = _exclude_weekends(candidate_dates)
     if not candidate_dates:
         return []
 
@@ -162,6 +171,7 @@ def start_ingest(st_placeholder=None):
     universe = cfg.get("universe", [])
     enabled = cfg.get("datasets", {}).get("enabled", [])
     t_start = cfg["ingest_master"]["start_date"]
+    t_end = cfg.get("ingest_master", {}).get("end_date")
     sleep_sec = float(cfg.get("ingest", {}).get("sleep_seconds", 0.3))
 
     d_map = {
@@ -220,6 +230,7 @@ def start_ingest(st_placeholder=None):
                 sid,
                 fm_api,
                 t_start,
+                target_end=t_end,
                 check_freq=check_freq,
             )
             if not pending_dates:
