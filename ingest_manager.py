@@ -111,17 +111,27 @@ def _resolve_column(conn, table_name, keywords, configured_col=None):
     return matched or configured_col
 
 
-def get_pending_dates(conn, stock_id, api_name, target_start, check_freq="B"):
+def _exclude_weekends(dates):
+    return [d for d in dates if d.weekday() < 5]
+
+
+def get_pending_dates(conn, stock_id, api_name, target_start, target_end=None, check_freq="B"):
     """依據同步區間 -> 排除已知休市 -> 比對 ingest_log，挑出 Missing/Failed 日期。"""
     t_start = datetime.strptime(target_start, "%Y-%m-%d").date()
-    t_end = datetime.now().date()
+    today = datetime.now().date()
+    if target_end:
+        t_end = datetime.strptime(target_end, "%Y-%m-%d").date()
+    else:
+        t_end = today
 
     candidate_dates = list(pd.date_range(start=t_start, end=t_end, freq=check_freq).date)
+    if check_freq == "B":
+        candidate_dates = _exclude_weekends(candidate_dates)
     if not candidate_dates:
         return []
 
     holidays = _get_known_holidays(conn, stock_id=stock_id, api_name=api_name)
-    candidate_dates = [d for d in candidate_dates if d not in holidays]
+    candidate_dates = [d for d in candidate_dates if d == today or d not in holidays]
     if not candidate_dates:
         return []
 
@@ -144,7 +154,10 @@ def get_pending_dates(conn, stock_id, api_name, target_start, check_freq="B"):
     pending_dates = []
     for d in candidate_dates:
         d_str = d.strftime("%Y-%m-%d")
-        if status_map.get(d_str) in {"Success", "NoTrade"}:
+        status = status_map.get(d_str)
+        if status == "Success":
+            continue
+        if d != today and status == "NoTrade":
             continue
         pending_dates.append(d)
 
@@ -162,6 +175,7 @@ def start_ingest(st_placeholder=None):
     universe = cfg.get("universe", [])
     enabled = cfg.get("datasets", {}).get("enabled", [])
     t_start = cfg["ingest_master"]["start_date"]
+    t_end = cfg.get("ingest_master", {}).get("end_date")
     sleep_sec = float(cfg.get("ingest", {}).get("sleep_seconds", 0.3))
 
     d_map = {
@@ -220,6 +234,7 @@ def start_ingest(st_placeholder=None):
                 sid,
                 fm_api,
                 t_start,
+                target_end=t_end,
                 check_freq=check_freq,
             )
             if not pending_dates:
@@ -233,7 +248,10 @@ def start_ingest(st_placeholder=None):
             try:
                 for d_str in [d.strftime("%Y-%m-%d") for d in pending_dates]:
                     status = _get_data_ingest_status(conn, sid, d_str, fm_api)
-                    if status in {"Success", "NoTrade"}:
+                    if status == "Success":
+                        continue
+                    is_today = d_str == datetime.now().strftime("%Y-%m-%d")
+                    if (not is_today) and status == "NoTrade":
                         continue
 
                     if key == "branch":

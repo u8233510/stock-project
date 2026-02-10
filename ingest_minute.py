@@ -96,13 +96,14 @@ def _require_column(column_name, table_name, keywords):
 def _get_pending_dates_for_minute(conn, stock_id, target_start, target_end, api_name=MINUTE_API_NAME):
     t_start = datetime.strptime(target_start, "%Y-%m-%d").date()
     t_end = datetime.strptime(target_end, "%Y-%m-%d").date()
+    today = datetime.now().date()
 
     candidate_dates = list(pd.date_range(start=t_start, end=t_end, freq="B").date)
     if not candidate_dates:
         return []
 
     holidays = _get_known_holidays(conn, stock_id=stock_id, api_name=api_name)
-    candidate_dates = [d for d in candidate_dates if d not in holidays]
+    candidate_dates = [d for d in candidate_dates if d == today or d not in holidays]
     if not candidate_dates:
         return []
 
@@ -124,7 +125,10 @@ def _get_pending_dates_for_minute(conn, stock_id, target_start, target_end, api_
     pending_dates = []
     for d in candidate_dates:
         d_str = d.strftime("%Y-%m-%d")
-        if status_map.get(d_str) in {"Success", "NoTrade"}:
+        status = status_map.get(d_str)
+        if status == "Success":
+            continue
+        if d != today and status == "NoTrade":
             continue
         pending_dates.append(d)
 
@@ -206,7 +210,11 @@ def run_minute_task(cfg):
         for d in [x.strftime("%Y-%m-%d") for x in pending_dates]:
             count += 1
             status = _get_data_ingest_status(conn, sid, d, MINUTE_API_NAME)
-            if status in {"Success", "NoTrade"}:
+            if status == "Success":
+                p_bar.progress(min(count / total, 1.0))
+                continue
+            is_today = d == datetime.now().strftime("%Y-%m-%d")
+            if (not is_today) and status == "NoTrade":
                 p_bar.progress(min(count / total, 1.0))
                 continue
 
