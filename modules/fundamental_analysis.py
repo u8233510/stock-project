@@ -28,7 +28,7 @@ def _google_search(query, cfg, max_results=5):
     api_key = search_cfg.get("google_api_key")
     cse_id = search_cfg.get("google_cse_id")
     if not api_key or not cse_id:
-        return []
+        return [], "Google 未設定 google_api_key 或 google_cse_id。"
 
     try:
         resp = requests.get(
@@ -42,9 +42,13 @@ def _google_search(query, cfg, max_results=5):
             },
             timeout=20,
         )
-        resp.raise_for_status()
-        items = resp.json().get("items", [])
-        return [
+        data = resp.json()
+        if resp.status_code >= 400:
+            err_msg = data.get("error", {}).get("message", f"HTTP {resp.status_code}") if isinstance(data, dict) else f"HTTP {resp.status_code}"
+            return [], f"Google 搜尋失敗：{err_msg}"
+
+        items = data.get("items", []) if isinstance(data, dict) else []
+        records = [
             {
                 "source": "Google",
                 "title": i.get("title", ""),
@@ -53,8 +57,11 @@ def _google_search(query, cfg, max_results=5):
             }
             for i in items
         ]
-    except Exception:
-        return []
+        if not records:
+            return [], "Google 已連線，但此查詢無結果。"
+        return records, None
+    except Exception as exc:
+        return [], f"Google 搜尋例外：{str(exc)}"
 
 
 def _perplexity_search(query, cfg):
@@ -63,7 +70,7 @@ def _perplexity_search(query, cfg):
     api_key = search_cfg.get("perplexity_api_key")
     model = search_cfg.get("perplexity_model", "sonar")
     if not api_key:
-        return []
+        return [], "Perplexity 未設定 perplexity_api_key。"
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
@@ -88,11 +95,17 @@ def _perplexity_search(query, cfg):
             json=payload,
             timeout=30,
         )
-        resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"]
-        return [{"source": "Perplexity", "title": "摘要", "snippet": content, "url": ""}]
-    except Exception:
-        return []
+        data = resp.json()
+        if resp.status_code >= 400:
+            err_msg = data.get("error", {}).get("message", f"HTTP {resp.status_code}") if isinstance(data, dict) else f"HTTP {resp.status_code}"
+            return [], f"Perplexity 搜尋失敗：{err_msg}"
+
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "") if isinstance(data, dict) else ""
+        if not content:
+            return [], "Perplexity 已連線，但無回傳內容。"
+        return [{"source": "Perplexity", "title": "摘要", "snippet": content, "url": ""}], None
+    except Exception as exc:
+        return [], f"Perplexity 搜尋例外：{str(exc)}"
 
 
 def _ddg_search(query, max_results=5, source="DuckDuckGo"):
@@ -108,9 +121,11 @@ def _ddg_search(query, max_results=5, source="DuckDuckGo"):
                         "url": r.get("href", ""),
                     }
                 )
-            return results
-    except Exception:
-        return []
+            if not results:
+                return [], f"{source} 查詢無結果。"
+            return results, None
+    except Exception as exc:
+        return [], f"{source} 搜尋例外：{str(exc)}"
 
 
 def _build_external_context(stock_name, sid, cfg):
@@ -118,9 +133,22 @@ def _build_external_context(stock_name, sid, cfg):
     base_query = f"{stock_name} {sid} 核心產品 產業地位 最新新聞"
 
     records = []
-    records.extend(_perplexity_search(base_query, cfg))
-    records.extend(_google_search(base_query, cfg, max_results=5))
-    records.extend(_ddg_search(base_query, max_results=5, source="DuckDuckGo"))
+    warnings = []
+
+    per_records, per_warn = _perplexity_search(base_query, cfg)
+    records.extend(per_records)
+    if per_warn:
+        warnings.append(per_warn)
+
+    google_records, google_warn = _google_search(base_query, cfg, max_results=5)
+    records.extend(google_records)
+    if google_warn:
+        warnings.append(google_warn)
+
+    ddg_records, ddg_warn = _ddg_search(base_query, max_results=5, source="DuckDuckGo")
+    records.extend(ddg_records)
+    if ddg_warn:
+        warnings.append(ddg_warn)
 
     # 社群/輿情（以公開可索引頁面為主，非登入資料）
     social_queries = [
@@ -129,17 +157,28 @@ def _build_external_context(stock_name, sid, cfg):
         (f"site:instagram.com {stock_name} {sid}", "Instagram"),
     ]
     for query, source in social_queries:
-        records.extend(_ddg_search(query, max_results=3, source=source))
+        social_records, social_warn = _ddg_search(query, max_results=3, source=source)
+        records.extend(social_records)
+        if social_warn:
+            warnings.append(social_warn)
 
     if not records:
-        return "", ["目前未取得外部來源。你可直接使用免金鑰的 DDG/社群搜尋；若要提升品質，再於 config.json 的 search 區段設定 Perplexity/Google API key（選填）。"]
+        warnings.insert(0, "目前未取得外部來源。請先檢查下方各來源診斷訊息。")
+        return "", warnings
+
+    source_counts = {}
+    for rec in records:
+        src = rec.get("source", "來源")
+        source_counts[src] = source_counts.get(src, 0) + 1
+    summary = "、".join([f"{k}:{v}" for k, v in source_counts.items()])
+    warnings.insert(0, f"外部來源抓取成功（{summary}）。")
 
     lines = []
     for rec in records[:20]:
         url = rec.get("url", "")
         url_text = f"（{url}）" if url else ""
         lines.append(f"- [{rec.get('source', '來源')}] {rec.get('title', '')}: {rec.get('snippet', '')} {url_text}")
-    return "\n".join(lines), []
+    return "\n".join(lines), warnings
 
 
 def _build_fundamental_prompt(stock_name, sid, search_ctx, metrics):
@@ -290,7 +329,7 @@ def show_fundamental_analysis():
             st.info("尚無股利歷史數據。")
 
     with tab3:
-        st.info("💡 外部資訊來源說明：目前後端已整合 Google / Perplexity（需選填 API key）與 DDG/社群公開頁面（免 key）。")
+        st.info("💡 外部資訊來源說明：目前後端已整合 Google / Perplexity / DDG / 社群公開頁面，並顯示各來源診斷訊息。")
         with st.expander("Puter.js 免 API Key 使用方式（前端範例）", expanded=False):
             st.markdown("可以直接這樣寫，但建議用 `async/await + try/catch`（如下）較容易除錯。")
             st.code(PUTER_JS_SNIPPET, language="html")
@@ -302,7 +341,10 @@ def show_fundamental_analysis():
                 search_ctx, search_warnings = _build_external_context(selected_stock, sid, cfg)
                 if search_warnings:
                     for w in search_warnings:
-                        st.warning(w)
+                        if w.startswith("外部來源抓取成功"):
+                            st.success(w)
+                        else:
+                            st.warning(w)
                 
                 # 獲取 AI 參考數據
                 latest_eps = profit_df['EPS'].iloc[0] if ('EPS' in profit_df.columns and not profit_df.empty) else "未提供"
