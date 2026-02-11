@@ -188,11 +188,24 @@ def _ddg_search(query, max_results=5, source="DuckDuckGo"):
 
 
 def _build_external_context(stock_name, sid, cfg):
-    """蒐集外部資訊（免費來源：DDG / 社群網站搜尋）。"""
+    """蒐集外部資訊（可配置付費/免費來源 + 社群網站搜尋）。"""
     base_query = f"{stock_name} {sid} 核心產品 產業地位 最新新聞"
+    search_cfg = cfg.get("search", {})
+    preferred_provider = str(search_cfg.get("provider", "ddg")).lower().strip()
 
     records = []
     warnings = []
+
+    if preferred_provider == "google":
+        google_records, google_warn = _google_search(base_query, cfg, max_results=6)
+        records.extend(google_records)
+        if google_warn:
+            warnings.append(google_warn)
+    elif preferred_provider == "perplexity":
+        pplx_records, pplx_warn = _perplexity_search(base_query, cfg)
+        records.extend(pplx_records)
+        if pplx_warn:
+            warnings.append(pplx_warn)
 
     ddg_records, ddg_warn = _ddg_search(base_query, max_results=5, source="DuckDuckGo")
     records.extend(ddg_records)
@@ -256,6 +269,47 @@ def _free_score_label(score):
     return "中性"
 
 
+def _latest_metric_value(financial_df, metric_names):
+    """從財報明細中取出指定指標的最新值。"""
+    if financial_df.empty:
+        return None
+
+    norm_names = {str(n).strip().lower() for n in metric_names}
+    matched = financial_df[financial_df["type"].astype(str).str.strip().str.lower().isin(norm_names)]
+    if matched.empty:
+        return None
+    return matched.iloc[0]["value"]
+
+
+def _fmt_percent(value):
+    val = _to_float(value)
+    if val is None:
+        return "未提供"
+    return f"{val:.2f}%"
+
+
+def _compute_data_quality(metrics):
+    required = [
+        "latest_eps",
+        "prev_eps",
+        "latest_revenue",
+        "oldest_revenue",
+        "revenue_growth",
+        "roe",
+        "roa",
+        "gross_margin",
+        "operating_cf",
+    ]
+    available = sum(1 for key in required if _to_float(metrics.get(key)) is not None)
+    ratio = available / len(required)
+
+    if ratio >= 0.8:
+        return "高", ratio
+    if ratio >= 0.5:
+        return "中", ratio
+    return "低", ratio
+
+
 def _build_free_fundamental_report(stock_name, sid, search_ctx, metrics):
     latest_eps = _to_float(metrics.get("latest_eps"))
     prev_eps = _to_float(metrics.get("prev_eps"))
@@ -283,6 +337,8 @@ def _build_free_fundamental_report(stock_name, sid, search_ctx, metrics):
     if search_ctx:
         ext_note = "已納入 DuckDuckGo 與社群公開頁面摘要（免費來源）。"
 
+    data_quality_level, data_quality_ratio = _compute_data_quality(metrics)
+
     return f"""
 ## 公司簡介
 {stock_name}（{sid}）為台股上市櫃公司，本報告採用內部資料庫財報欄位與免費外部搜尋摘要進行整理。
@@ -293,10 +349,10 @@ def _build_free_fundamental_report(stock_name, sid, search_ctx, metrics):
 
 ### 財務指標
 - EPS：{_fmt_metric(metrics.get('latest_eps'))}
-- ROE（股東權益報酬率）：未提供
-- ROA（資產報酬率）：未提供
+- ROE（股東權益報酬率）：{_fmt_percent(metrics.get('roe'))}
+- ROA（資產報酬率）：{_fmt_percent(metrics.get('roa'))}
 - 營收成長率：{_fmt_metric(metrics.get('revenue_growth'))}
-- 毛利率：未提供
+- 毛利率：{_fmt_percent(metrics.get('gross_margin'))}
 
 ## 營收分析
 近 12 月營收由 { _fmt_metric(metrics.get('oldest_revenue')) } 億變化至 { _fmt_metric(metrics.get('latest_revenue')) } 億，成長率為 { _fmt_metric(metrics.get('revenue_growth')) }。
@@ -306,7 +362,8 @@ def _build_free_fundamental_report(stock_name, sid, search_ctx, metrics):
 目前資料庫未提供可直接計算的最新毛利率欄位，建議後續補齊季報毛利率以提升判讀精度。
 
 ## 現金流量分析
-目前資料庫未提供完整現金流量欄位，本段為資料不足。
+營業現金流（Operating Cash Flow）：{_fmt_metric(metrics.get('operating_cf'))}。
+若營收與獲利成長但現金流未同步改善，需留意應收帳款、庫存與資本支出壓力。
 
 ## 投資評價
 - 短期評價：{_free_score_label(score)}（以營收與 EPS 最新變化為主）
@@ -320,8 +377,9 @@ def _build_free_fundamental_report(stock_name, sid, search_ctx, metrics):
 - 法規/政策風險：需留意產業政策、出口管制與會計準則變動
 
 ## 結論
-本次為「免費版 AI 基本面分析」，以可驗證數據做規則化摘要，不使用付費 LLM API。
-建議後續持續追蹤：EPS 連續性、營收年增率轉折、以及重大新聞事件對訂單與毛利率的影響。
+本次為「免費版 AI 基本面分析」，以可驗證數據做規則化摘要；若啟用 LLM 可再進一步做脈絡整合。
+目前資料完整度評估：{data_quality_level}（{data_quality_ratio:.0%}）。
+建議後續持續追蹤：EPS 連續性、營收年增率轉折、現金流品質，以及重大新聞事件對訂單與毛利率的影響。
 """.strip()
 
 
@@ -380,15 +438,24 @@ def _build_fundamental_prompt(stock_name, sid, search_ctx, metrics):
 - 近 12 月最新營收（億元）：{metrics.get('latest_revenue', '未提供')}
 - 近 12 月最舊營收（億元）：{metrics.get('oldest_revenue', '未提供')}
 - 估算營收成長率（最新 vs 最舊）：{metrics.get('revenue_growth', '未提供')}
+- ROE：{metrics.get('roe', '未提供')}
+- ROA：{metrics.get('roa', '未提供')}
+- 毛利率：{metrics.get('gross_margin', '未提供')}
+- 營業現金流：{metrics.get('operating_cf', '未提供')}
 """.strip()
 
 # 1. 核心 AI 呼叫工具 (保持穩定，未更動)
 def _call_nim_fundamental(cfg, prompt):
     llm_cfg = cfg.get("llm", {})
+    api_key = _normalize_secret(llm_cfg.get("api_key"))
+    model_name = llm_cfg.get("model") or "meta/llama-3.1-70b-instruct"
+    if not api_key:
+        raise ValueError("llm.api_key 未設定。")
+
     url = "https://integrate.api.nvidia.com/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {llm_cfg.get('api_key')}", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
-        "model": llm_cfg.get("model"),
+        "model": model_name,
         "messages": [
             {"role": "system", "content": "你是一位專業的證券分析師。請優先參考連網搜尋到的事實，結合財務數據給出具體的投資評價，嚴禁虛構公司業務。"},
             {"role": "user", "content": prompt}
@@ -396,7 +463,19 @@ def _call_nim_fundamental(cfg, prompt):
         "temperature": 0.1
     }
     resp = requests.post(url, headers=headers, json=payload, timeout=60)
-    return resp.json()["choices"][0]["message"]["content"]
+    try:
+        data = resp.json()
+    except Exception:
+        data = {}
+
+    if resp.status_code >= 400:
+        err_msg = data.get("error", {}).get("message") if isinstance(data, dict) else None
+        raise RuntimeError(err_msg or f"NIM API 呼叫失敗（HTTP {resp.status_code}）。")
+
+    content = data.get("choices", [{}])[0].get("message", {}).get("content", "") if isinstance(data, dict) else ""
+    if not content:
+        raise RuntimeError("NIM API 未回傳可用內容。")
+    return content
 
 def show_fundamental_analysis():
     st.markdown("### 💎 基本面數據全覽與 AI 診斷")
@@ -427,7 +506,17 @@ def show_fundamental_analysis():
         rev_df = rev_df[['日期', '營收(億)']]
     
     # (2+4) 每季獲利與 EPS：安全轉置處理
-    profit_raw = pd.read_sql(f"SELECT date, type, value FROM stock_financial_statements WHERE stock_id='{sid}' AND type IN ('EPS', 'Net Profit') ORDER BY date DESC LIMIT 16", conn)
+    metric_candidates = [
+        "EPS", "Net Profit", "ROE", "ROE(%)", "Return on Equity",
+        "ROA", "ROA(%)", "Return on Assets",
+        "Gross Margin", "Gross Margin(%)", "毛利率",
+        "Operating Cash Flow", "營業活動之淨現金流入（流出）", "營業現金流",
+    ]
+    metric_filter = ", ".join([f"'{m}'" for m in metric_candidates])
+    profit_raw = pd.read_sql(
+        f"SELECT date, type, value FROM stock_financial_statements WHERE stock_id='{sid}' AND type IN ({metric_filter}) ORDER BY date DESC LIMIT 200",
+        conn,
+    )
     if not profit_raw.empty:
         profit_df = profit_raw.pivot(index='date', columns='type', values='value').reset_index()
         # 安全重命名
@@ -473,10 +562,30 @@ def show_fundamental_analysis():
             st.info("尚無股利歷史數據。")
 
     with tab3:
-        st.info("💡 已切換為免費模式：AI 基本面報告只使用本地規則 + DuckDuckGo/社群公開搜尋，不再呼叫付費 LLM。")
+        llm_cfg = cfg.get("llm", {})
+        llm_available = bool(_normalize_secret(llm_cfg.get("api_key")))
 
+        use_llm = st.toggle(
+            "啟用 LLM 強化分析（可選）",
+            value=llm_available,
+            help="若已設定 llm.api_key，建議開啟；未啟用時系統將使用免費規則化摘要。",
+        )
+        model_name = st.text_input(
+            "LLM 模型（NVIDIA NIM）",
+            value=llm_cfg.get("model") or "meta/llama-3.1-70b-instruct",
+            disabled=not use_llm,
+        )
+
+        if use_llm and not llm_available:
+            st.warning("目前未設定 llm.api_key，將自動回退到免費規則化報告。")
+
+        if llm_available:
+            st.success(f"✅ 已偵測到 llm.api_key（{_mask_secret(llm_cfg.get('api_key'))}），可直接使用 {model_name} 進行強化分析。")
+        st.info("💡 改善建議：若要提高基本面品質，請補齊 ROE/ROA/毛利率/現金流欄位，並搭配 LLM 做交叉判讀。")
+
+        run_btn_label = "🚀 啟動 AI 基本面分析（LLM 強化）" if use_llm else "🚀 啟動 AI 基本面分析（免費規則化）"
         # ✅ 保留聯網搜尋邏輯
-        if st.button(f"🚀 啟動 {selected_stock} 免費 AI 基本面分析", use_container_width=True):
+        if st.button(run_btn_label, use_container_width=True):
             with st.spinner("正在搜尋最新產業地位與市場新聞..."):
                 search_ctx, search_warnings = _build_external_context(selected_stock, sid, cfg)
                 if search_warnings:
@@ -506,9 +615,23 @@ def show_fundamental_analysis():
                     "prev_eps": prev_eps,
                     "latest_revenue": latest_revenue,
                     "oldest_revenue": oldest_revenue,
-                    "revenue_growth": revenue_growth
+                    "revenue_growth": revenue_growth,
+                    "roe": _latest_metric_value(profit_raw, ["ROE", "Return on Equity", "ROE(%)"]),
+                    "roa": _latest_metric_value(profit_raw, ["ROA", "Return on Assets", "ROA(%)"]),
+                    "gross_margin": _latest_metric_value(profit_raw, ["Gross Margin", "Gross Margin(%)", "毛利率"]),
+                    "operating_cf": _latest_metric_value(profit_raw, ["Operating Cash Flow", "營業活動之淨現金流入（流出）", "營業現金流"]),
                 }
 
-                st.markdown(_build_free_fundamental_report(selected_stock, sid, search_ctx, metrics))
+                if use_llm and llm_available:
+                    cfg.setdefault("llm", {})["model"] = model_name
+                    prompt = _build_fundamental_prompt(selected_stock, sid, search_ctx, metrics)
+                    try:
+                        ai_report = _call_nim_fundamental(cfg, prompt)
+                        st.markdown(ai_report)
+                    except Exception as exc:
+                        st.error(f"LLM 呼叫失敗，改用免費規則化報告：{str(exc)}")
+                        st.markdown(_build_free_fundamental_report(selected_stock, sid, search_ctx, metrics))
+                else:
+                    st.markdown(_build_free_fundamental_report(selected_stock, sid, search_ctx, metrics))
 
     conn.close()
