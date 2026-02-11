@@ -26,6 +26,42 @@ def _google_error_hint(err_msg):
         return "尚未啟用 Custom Search JSON API，請到 Google Cloud Console 啟用後再試。"
     return "請檢查 API key 是否正確、Custom Search JSON API 是否啟用、以及 key 限制是否允許目前執行環境。"
 
+
+
+def _mask_secret(value, keep=4):
+    """遮罩敏感資訊，避免完整金鑰外露。"""
+    val = _normalize_secret(value)
+    if not val:
+        return "(未設定)"
+    if len(val) <= keep:
+        return "*" * len(val)
+    return f"{'*' * (len(val) - keep)}{val[-keep:]}"
+
+
+def _google_connectivity_check(cfg):
+    """快速檢查 Google CSE API 是否可由目前環境成功呼叫。"""
+    search_cfg = cfg.get("search", {})
+    api_key = _normalize_secret(search_cfg.get("google_api_key"))
+    cse_id = _normalize_secret(search_cfg.get("google_cse_id"))
+    if not api_key or not cse_id:
+        return False, "Google 檢查失敗：google_api_key 或 google_cse_id 未設定。"
+
+    try:
+        resp = requests.get(
+            "https://www.googleapis.com/customsearch/v1",
+            params={"key": api_key, "cx": cse_id, "q": "台股", "num": 1, "hl": "zh-TW"},
+            timeout=20,
+        )
+        data = resp.json()
+        if resp.status_code >= 400:
+            err_msg = data.get("error", {}).get("message", f"HTTP {resp.status_code}") if isinstance(data, dict) else f"HTTP {resp.status_code}"
+            return False, f"Google 連線檢查失敗：{err_msg}｜建議：{_google_error_hint(err_msg)}"
+
+        total = data.get("searchInformation", {}).get("totalResults", "?") if isinstance(data, dict) else "?"
+        return True, f"Google 連線檢查成功：API 可用（totalResults={total}）。"
+    except Exception as exc:
+        return False, f"Google 連線檢查例外：{str(exc)}"
+
 PUTER_JS_SNIPPET = """<script src="https://js.puter.com/v2/"></script>
 <script>
 async function runPuterDemo() {
@@ -357,6 +393,18 @@ def show_fundamental_analysis():
             st.markdown("可以直接這樣寫，但建議用 `async/await + try/catch`（如下）較容易除錯。")
             st.code(PUTER_JS_SNIPPET, language="html")
             st.markdown("支援模型示例：`perplexity/sonar`、`perplexity/sonar-pro`、`perplexity/sonar-deep-research`、`perplexity/sonar-reasoning-pro`。")
+
+        with st.expander("Google API 設定診斷", expanded=False):
+            st.caption("僅顯示遮罩後資訊，協助確認程式讀到的設定值是否正確。")
+            st.write(f"- google_api_key: `{_mask_secret(cfg.get('search', {}).get('google_api_key'))}`")
+            st.write(f"- google_cse_id: `{_mask_secret(cfg.get('search', {}).get('google_cse_id'))}`")
+            st.caption("若你在 Google Console 已看到 API 啟用，但仍報 key 無效，常見是：金鑰來自不同專案、金鑰限制（HTTP referrer/IP）不符、或剛建立尚未生效。")
+            if st.button("🧪 測試 Google CSE 連線", use_container_width=True):
+                ok, msg = _google_connectivity_check(cfg)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.warning(msg)
 
         # ✅ 保留聯網搜尋邏輯
         if st.button(f"🚀 啟動 {selected_stock} 聯網事實分析", use_container_width=True):
