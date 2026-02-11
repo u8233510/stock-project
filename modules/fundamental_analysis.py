@@ -4,6 +4,28 @@ import database
 import requests
 from duckduckgo_search import DDGS
 
+
+
+def _normalize_secret(value):
+    """去除常見貼上污染（空白/換行/BOM）。"""
+    if value is None:
+        return ""
+    return str(value).replace("﻿", "").strip()
+
+
+def _google_error_hint(err_msg):
+    """將 Google API 常見錯誤轉成可操作建議。"""
+    msg = (err_msg or "").lower()
+    if "api key not valid" in msg or "invalid" in msg:
+        return "請確認：1) API key 屬於同一個 GCP 專案；2) 已啟用 Custom Search JSON API；3) key 沒有被 HTTP referrer/IP 限制擋住此執行環境。"
+    if "referer" in msg or "ip" in msg or "not allowed" in msg:
+        return "此金鑰限制不符（HTTP referrer/IP）。若在本機 Python 後端呼叫，請移除 referrer 限制或改用允許該來源的金鑰。"
+    if "quota" in msg or "rate limit" in msg:
+        return "已達配額上限，請檢查 GCP Quotas/計費設定。"
+    if "access not configured" in msg or "has not been used" in msg:
+        return "尚未啟用 Custom Search JSON API，請到 Google Cloud Console 啟用後再試。"
+    return "請檢查 API key 是否正確、Custom Search JSON API 是否啟用、以及 key 限制是否允許目前執行環境。"
+
 PUTER_JS_SNIPPET = """<script src="https://js.puter.com/v2/"></script>
 <script>
 async function runPuterDemo() {
@@ -25,8 +47,8 @@ runPuterDemo();
 def _google_search(query, cfg, max_results=5):
     """透過 Google Custom Search 取得搜尋摘要。"""
     search_cfg = cfg.get("search", {})
-    api_key = search_cfg.get("google_api_key")
-    cse_id = search_cfg.get("google_cse_id")
+    api_key = _normalize_secret(search_cfg.get("google_api_key"))
+    cse_id = _normalize_secret(search_cfg.get("google_cse_id"))
     if not api_key or not cse_id:
         return [], "Google 未設定 google_api_key 或 google_cse_id。"
 
@@ -45,7 +67,8 @@ def _google_search(query, cfg, max_results=5):
         data = resp.json()
         if resp.status_code >= 400:
             err_msg = data.get("error", {}).get("message", f"HTTP {resp.status_code}") if isinstance(data, dict) else f"HTTP {resp.status_code}"
-            return [], f"Google 搜尋失敗：{err_msg}"
+            hint = _google_error_hint(err_msg)
+            return [], f"Google 搜尋失敗：{err_msg}｜建議：{hint}"
 
         items = data.get("items", []) if isinstance(data, dict) else []
         records = [
@@ -67,7 +90,7 @@ def _google_search(query, cfg, max_results=5):
 def _perplexity_search(query, cfg):
     """透過 Perplexity API 取得外部資訊摘要。"""
     search_cfg = cfg.get("search", {})
-    api_key = search_cfg.get("perplexity_api_key")
+    api_key = _normalize_secret(search_cfg.get("perplexity_api_key"))
     model = search_cfg.get("perplexity_model", "sonar")
     if not api_key:
         return [], "Perplexity 未設定 perplexity_api_key。"
@@ -329,7 +352,7 @@ def show_fundamental_analysis():
             st.info("尚無股利歷史數據。")
 
     with tab3:
-        st.info("💡 外部資訊來源說明：目前後端已整合 Google / Perplexity / DDG / 社群公開頁面，並顯示各來源診斷訊息。")
+        st.info("💡 外部資訊來源說明：目前後端已整合 Google / Perplexity / DDG / 社群公開頁面，並顯示各來源診斷訊息。若 Google 回報 key 無效，通常是 API 啟用或金鑰限制問題。")
         with st.expander("Puter.js 免 API Key 使用方式（前端範例）", expanded=False):
             st.markdown("可以直接這樣寫，但建議用 `async/await + try/catch`（如下）較容易除錯。")
             st.code(PUTER_JS_SNIPPET, language="html")
