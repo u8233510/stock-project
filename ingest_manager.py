@@ -6,6 +6,7 @@ from FinMind.data import DataLoader
 
 import database
 from weighted_cost_utils import compute_interval_metrics
+from branch_weighted_cost_helpers import rebuild_latest_branch_weighted_cost
 
 
 def _ensure_data_ingest_log_table(conn):
@@ -213,19 +214,6 @@ def _sync_branch_weighted_cost_gaps(conn, stock_id, start_date, end_date=None):
 
 
 
-
-def _rebuild_latest_branch_weighted_cost(conn, universe, t_start, t_end, log, failed_log):
-    """在 ingest 主流程完成後，統一重算每檔最新 rolling(5/20/60) 快照。"""
-    log("🧮 開始更新 branch_weighted_cost（僅最新 5/20/60 rolling 快照）...")
-    for stock in universe:
-        sid = stock["stock_id"]
-        try:
-            updated = _sync_branch_weighted_cost_gaps(conn, sid, t_start, t_end)
-            if updated:
-                log(f"    ✅ [{sid}] weighted_cost 更新基準日: {updated[0]}")
-        except Exception as e:
-            log(f"    ❌ [{sid}] weighted_cost 更新失敗: {e}")
-            failed_log.append(f"{sid} branch_weighted_cost: {e}")
 
 def _sync_missing_branch_weighted_cost(conn, stock_id, start_date, end_date=None):
     """Backward-compatible wrapper for older call-sites."""
@@ -461,7 +449,7 @@ def start_ingest(st_placeholder=None):
             time.sleep(sleep_sec)
 
     if "branch" in enabled:
-        _rebuild_latest_branch_weighted_cost(conn, universe, t_start, t_end, log, failed_log)
+        rebuild_latest_branch_weighted_cost(conn, universe, t_start, t_end, log, failed_log, _sync_branch_weighted_cost_gaps)
 
     conn.close()
     return failed_log

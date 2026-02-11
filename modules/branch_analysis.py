@@ -6,6 +6,7 @@ import json
 import requests
 import plotly.graph_objects as go
 from weighted_cost_utils import compute_interval_metrics
+from branch_weighted_cost_helpers import format_snapshot_caption
 
 
 def _call_nim(cfg, messages, temperature=0.0, max_tokens=2000):
@@ -88,10 +89,6 @@ def _load_window_snapshot(conn, sid, window):
 
 
 
-def _format_snapshot_caption(row):
-    return f"淨張數: {int(row[1])} | 集中度: {float(row[2]):.2f}% | 截止日: {row[3]}"
-
-
 def show_branch_analysis():
     st.markdown("### 🔍 專業級分點籌碼與產業聯動診斷")
     cfg = database.load_config()
@@ -172,7 +169,7 @@ def show_branch_analysis():
             with col:
                 if row:
                     st.metric(f"{window}日均價成本", f"${row[0]:.2f}")
-                    st.caption(_format_snapshot_caption(row))
+                    st.caption(format_snapshot_caption(row))
                 else:
                     st.metric(f"{window}日均價成本", "N/A")
                     st.caption("尚無快照")
