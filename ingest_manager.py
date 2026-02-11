@@ -5,10 +5,22 @@ import pandas as pd
 from FinMind.data import DataLoader
 
 import database
+from weighted_cost_utils import compute_interval_metrics
+from branch_weighted_cost_helpers import rebuild_latest_branch_weighted_cost
 
 
 def _ensure_data_ingest_log_table(conn):
     database.ensure_data_ingest_log_schema(conn)
+
+
+def _ensure_branch_weighted_cost_schema(conn):
+    conn.execute(database.TABLE_REGISTRY["branch_weighted_cost"])
+    cols = database.get_table_columns(conn, "branch_weighted_cost")
+    if "window_type" not in cols:
+        conn.execute("ALTER TABLE branch_weighted_cost ADD COLUMN window_type TEXT DEFAULT 'legacy'")
+    if "window_days" not in cols:
+        conn.execute("ALTER TABLE branch_weighted_cost ADD COLUMN window_days INTEGER")
+    conn.commit()
 
 
 def _get_data_ingest_status(conn, stock_id, trade_date, api_name):
@@ -63,54 +75,26 @@ BRANCH_WEIGHTED_COST_WINDOWS = (5, 20, 60)
 
 def _compute_branch_weighted_cost_from_period_df(df, top_n=15):
     """從區間 branch 明細計算平均成本、淨張數與籌碼集中度。"""
-    if df is None or df.empty:
-        return 0.0, 0, 0.0
-
-    work = df.copy()
-    for col in ["buy", "sell", "price"]:
-        if col not in work.columns:
-            return 0.0, 0, 0.0
-
-    work["buy"] = pd.to_numeric(work["buy"], errors="coerce").fillna(0)
-    work["sell"] = pd.to_numeric(work["sell"], errors="coerce").fillna(0)
-    work["price"] = pd.to_numeric(work["price"], errors="coerce")
-    work = work.dropna(subset=["price"])
-    if work.empty:
-        return 0.0, 0, 0.0
-
-    total_buy_volume = float(work["buy"].sum())
-    total_net_volume = int((work["buy"] - work["sell"]).sum())
-
-    avg_cost = 0.0
-    if total_buy_volume > 0:
-        avg_cost = round(float((work["price"] * work["buy"]).sum() / total_buy_volume), 2)
-
-    trader_col = "securities_trader_id" if "securities_trader_id" in work.columns else "securities_trader"
-    if trader_col not in work.columns:
-        concentration = 0.0
-    else:
-        trader_net = (
-            work.groupby(trader_col, dropna=False)
-            .apply(lambda g: float(g["buy"].sum() - g["sell"].sum()))
-        )
-        if trader_net.empty or total_buy_volume <= 0:
-            concentration = 0.0
-        else:
-            n = max(1, int(top_n or 15))
-            top_buy = float(trader_net.nlargest(n).clip(lower=0).sum())
-            top_sell_abs = float(abs(trader_net.nsmallest(n).clip(upper=0).sum()))
-            concentration = round(((top_buy - top_sell_abs) / total_buy_volume) * 100, 2)
-
-    return avg_cost, total_net_volume, concentration
+    return compute_interval_metrics(df, top_n=top_n)
 
 
-def _upsert_branch_weighted_cost(conn, stock_id, start_date, end_date, avg_cost, total_net_volume, concentration):
+def _upsert_branch_weighted_cost(
+    conn,
+    stock_id,
+    start_date,
+    end_date,
+    avg_cost,
+    total_net_volume,
+    concentration,
+    window_type="legacy",
+    window_days=None,
+):
     conn.execute(
         """
         INSERT OR REPLACE INTO branch_weighted_cost(
-            stock_id, start_date, end_date, avg_cost, total_net_volume, concentration
+            stock_id, start_date, end_date, avg_cost, total_net_volume, concentration, window_type, window_days
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             stock_id,
@@ -119,11 +103,21 @@ def _upsert_branch_weighted_cost(conn, stock_id, start_date, end_date, avg_cost,
             float(avg_cost or 0),
             int(total_net_volume or 0),
             float(concentration or 0),
+            str(window_type or "legacy"),
+            int(window_days) if window_days is not None else None,
         ),
     )
 
 
-def calculate_and_save_weighted_cost(conn, stock_id, start_date, end_date, top_n=15):
+def calculate_and_save_weighted_cost(
+    conn,
+    stock_id,
+    start_date,
+    end_date,
+    top_n=15,
+    window_type="user_custom",
+    window_days=None,
+):
     """計算特定區間的籌碼統計並存入 branch_weighted_cost。"""
     period_df = pd.read_sql(
         """
@@ -143,28 +137,28 @@ def calculate_and_save_weighted_cost(conn, stock_id, start_date, end_date, top_n
         return False
 
     avg_cost, total_net_volume, concentration = _compute_branch_weighted_cost_from_period_df(period_df, top_n=top_n)
-    _upsert_branch_weighted_cost(conn, stock_id, start_date, end_date, avg_cost, total_net_volume, concentration)
+    _upsert_branch_weighted_cost(
+        conn,
+        stock_id,
+        start_date,
+        end_date,
+        avg_cost,
+        total_net_volume,
+        concentration,
+        window_type=window_type,
+        window_days=window_days,
+    )
     return True
 
 
 def _refresh_branch_weighted_cost_for_trade_date(conn, stock_id, trade_date):
-    """每次寫入 branch_price_daily 後，重算指定 end_date 的區間加權成本。"""
+    """只保留最新 rolling(5/20/60) 快照。"""
     day_exists = conn.execute(
         "SELECT 1 FROM branch_price_daily WHERE stock_id = ? AND date = ? LIMIT 1",
         (stock_id, trade_date),
     ).fetchone()
     if not day_exists:
-        conn.execute(
-            "DELETE FROM branch_weighted_cost WHERE stock_id = ? AND end_date = ?",
-            (stock_id, trade_date),
-        )
-        conn.commit()
         return
-
-    conn.execute(
-        "DELETE FROM branch_weighted_cost WHERE stock_id = ? AND end_date = ?",
-        (stock_id, trade_date),
-    )
 
     for window in BRANCH_WEIGHTED_COST_WINDOWS:
         trade_dates = conn.execute(
@@ -183,36 +177,42 @@ def _refresh_branch_weighted_cost_for_trade_date(conn, stock_id, trade_date):
             continue
 
         period_start = dates[0]
-        calculate_and_save_weighted_cost(conn, stock_id, period_start, trade_date, top_n=15)
+        conn.execute(
+            "DELETE FROM branch_weighted_cost WHERE stock_id = ? AND window_type = 'rolling' AND window_days = ?",
+            (stock_id, int(window)),
+        )
+        calculate_and_save_weighted_cost(
+            conn,
+            stock_id,
+            period_start,
+            trade_date,
+            top_n=15,
+            window_type="rolling",
+            window_days=int(window),
+        )
 
     conn.commit()
 
 
 def _sync_branch_weighted_cost_gaps(conn, stock_id, start_date, end_date=None):
-    """補齊 branch_price_daily 已有但 branch_weighted_cost 缺漏的日期。"""
-    end_date = end_date or datetime.now().strftime("%Y-%m-%d")
-    rows = conn.execute(
+    """保留相容: 只以 branch_price_daily 最新交易日重算 rolling(5/20/60)。"""
+    _ = start_date
+    _ = end_date
+    row = conn.execute(
         """
-        SELECT b.date
-        FROM (
-            SELECT DISTINCT date
-            FROM branch_price_daily
-            WHERE stock_id = ? AND date >= ? AND date <= ?
-        ) b
-        LEFT JOIN branch_weighted_cost w
-          ON w.stock_id = ?
-         AND w.end_date = b.date
-        GROUP BY b.date
-        HAVING COUNT(w.start_date) < ?
-        ORDER BY b.date
+        SELECT MAX(date)
+        FROM branch_price_daily
+        WHERE stock_id = ?
         """,
-        (stock_id, start_date, end_date, stock_id, len(BRANCH_WEIGHTED_COST_WINDOWS)),
-    ).fetchall()
+        (stock_id,),
+    ).fetchone()
+    latest = str(row[0])[:10] if row and row[0] else None
+    if latest:
+        _refresh_branch_weighted_cost_for_trade_date(conn, stock_id, latest)
+        return [latest]
+    return []
 
-    missing_dates = [str(r[0])[:10] for r in rows if r and r[0]]
-    for trade_date in missing_dates:
-        _refresh_branch_weighted_cost_for_trade_date(conn, stock_id, trade_date)
-    return missing_dates
+
 
 
 def _sync_missing_branch_weighted_cost(conn, stock_id, start_date, end_date=None):
@@ -333,8 +333,7 @@ def start_ingest(st_placeholder=None):
     api.login_by_token(api_token=cfg["finmind"]["api_token"])
     conn = database.get_db_connection(cfg)
     _ensure_data_ingest_log_table(conn)
-    conn.execute(database.TABLE_REGISTRY["branch_weighted_cost"])
-    conn.commit()
+    _ensure_branch_weighted_cost_schema(conn)
 
     universe = cfg.get("universe", [])
     enabled = cfg.get("datasets", {}).get("enabled", [])
@@ -402,10 +401,7 @@ def start_ingest(st_placeholder=None):
                 check_freq=check_freq,
             )
 
-            if key == "branch":
-                _sync_branch_weighted_cost_gaps(conn, sid, t_start, t_end)
-
-            if not pending_dates:
+            if not pending_dates and key != "branch":
                 continue
 
             pending_ranges = _merge_dates_to_ranges(pending_dates)
@@ -435,8 +431,6 @@ def start_ingest(st_placeholder=None):
                     if df is not None and not df.empty:
                         clean_df = process_data(df, table, conn)
                         upsert_data(conn, table, clean_df)
-                        if key == "branch":
-                            _refresh_branch_weighted_cost_for_trade_date(conn, sid, d_str)
                         if resolved_date_col in clean_df.columns:
                             db_count = int((clean_df[resolved_date_col].astype(str).str[:10] == d_str).sum())
                         else:
@@ -453,6 +447,9 @@ def start_ingest(st_placeholder=None):
                 failed_log.append(f"{sid} {key}: {e}")
 
             time.sleep(sleep_sec)
+
+    if "branch" in enabled:
+        rebuild_latest_branch_weighted_cost(conn, universe, t_start, t_end, log, failed_log, _sync_branch_weighted_cost_gaps)
 
     conn.close()
     return failed_log

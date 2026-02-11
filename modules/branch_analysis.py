@@ -5,6 +5,8 @@ import database
 import json
 import requests
 import plotly.graph_objects as go
+from weighted_cost_utils import compute_interval_metrics
+from branch_weighted_cost_helpers import format_snapshot_caption
 
 
 def _call_nim(cfg, messages, temperature=0.0, max_tokens=2000):
@@ -48,71 +50,43 @@ def color_volume(val):
 
 
 def _compute_interval_metrics(df, top_n=15):
-    if df is None or df.empty:
-        return 0.0, 0, 0.0
-
-    work = df.copy()
-    work["buy"] = pd.to_numeric(work["buy"], errors="coerce").fillna(0)
-    work["sell"] = pd.to_numeric(work["sell"], errors="coerce").fillna(0)
-    work["price"] = pd.to_numeric(work["price"], errors="coerce")
-    work = work.dropna(subset=["price"])
-    if work.empty:
-        return 0.0, 0, 0.0
-
-    total_buy = float(work["buy"].sum())
-    total_net = int((work["buy"] - work["sell"]).sum())
-    avg_cost = round(float((work["price"] * work["buy"]).sum() / total_buy), 2) if total_buy > 0 else 0.0
-
-    if "securities_trader_id" not in work.columns:
-        return avg_cost, total_net, 0.0
-
-    trader_net = work.groupby("securities_trader_id", dropna=False).apply(lambda g: float(g["buy"].sum() - g["sell"].sum()))
-    n = max(1, int(top_n or 15))
-    top_buy = float(trader_net.nlargest(n).clip(lower=0).sum())
-    top_sell_abs = float(abs(trader_net.nsmallest(n).clip(upper=0).sum()))
-    concentration = round(((top_buy - top_sell_abs) / total_buy) * 100, 2) if total_buy > 0 else 0.0
-    return avg_cost, total_net, concentration
+    return compute_interval_metrics(df, top_n=top_n)
 
 
 def _upsert_interval_metrics(conn, sid, start_date, end_date, avg_cost, total_net_volume, concentration):
+    window_days = (pd.to_datetime(end_date).date() - pd.to_datetime(start_date).date()).days + 1
     conn.execute(
         """
         INSERT OR REPLACE INTO branch_weighted_cost
-        (stock_id, start_date, end_date, avg_cost, total_net_volume, concentration)
-        VALUES (?, ?, ?, ?, ?, ?)
+        (stock_id, start_date, end_date, avg_cost, total_net_volume, concentration, window_type, window_days)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (sid, str(start_date), str(end_date), float(avg_cost or 0), int(total_net_volume or 0), float(concentration or 0)),
+        (
+            sid,
+            str(start_date),
+            str(end_date),
+            float(avg_cost or 0),
+            int(total_net_volume or 0),
+            float(concentration or 0),
+            "user_custom",
+            int(window_days),
+        ),
     )
 
 
-def _get_window_start_date(conn, sid, end_date, window):
-    rows = conn.execute(
-        """
-        SELECT DISTINCT date
-        FROM branch_price_daily
-        WHERE stock_id = ? AND date <= ?
-        ORDER BY date DESC
-        LIMIT ?
-        """,
-        (sid, str(end_date), int(window)),
-    ).fetchall()
-    dates = sorted([str(r[0])[:10] for r in rows if r and r[0]])
-    return dates[0] if dates else None
-
-
-def _load_window_snapshot(conn, sid, end_date, window):
-    start_date = _get_window_start_date(conn, sid, end_date, window)
-    if not start_date:
-        return None
+def _load_window_snapshot(conn, sid, window):
     return conn.execute(
         """
-        SELECT avg_cost, total_net_volume, concentration
+        SELECT avg_cost, total_net_volume, concentration, end_date
         FROM branch_weighted_cost
-        WHERE stock_id = ? AND start_date = ? AND end_date = ?
+        WHERE stock_id = ? AND window_type = 'rolling' AND window_days = ?
+        ORDER BY end_date DESC
         LIMIT 1
         """,
-        (sid, start_date, str(end_date)),
+        (sid, int(window)),
     ).fetchone()
+
+
 
 
 def show_branch_analysis():
@@ -121,7 +95,6 @@ def show_branch_analysis():
     conn = database.get_db_connection(cfg)
     universe = cfg.get("universe", [])
     stock_options = {f"{s['stock_id']} {s['name']}": s['stock_id'] for s in universe}
-    id_to_name = {s['stock_id']: s['name'] for s in universe}
 
     c1, c2, c3, c4, c5 = st.columns([1.7, 1.5, 1.1, 0.7, 1.2])
     with c1:
@@ -189,14 +162,14 @@ def show_branch_analysis():
         if chip_concentration > 30:
             st.error(f"⚠️ 偵測到籌碼異常集中！前五大分點買超佔比達 {chip_concentration}%")
         
-        st.caption("區間快照（以所選結束日為基準）：5日 / 20日 / 60日")
+        st.caption("最新 rolling 快照：5日 / 20日 / 60日")
         w1, w2, w3 = st.columns(3)
         for col, window in zip([w1, w2, w3], [5, 20, 60]):
-            row = _load_window_snapshot(conn, sid, end_d.isoformat(), window)
+            row = _load_window_snapshot(conn, sid, window)
             with col:
                 if row:
                     st.metric(f"{window}日均價成本", f"${row[0]:.2f}")
-                    st.caption(f"淨張數: {int(row[1])} | 集中度: {float(row[2]):.2f}%")
+                    st.caption(format_snapshot_caption(row))
                 else:
                     st.metric(f"{window}日均價成本", "N/A")
                     st.caption("尚無快照")

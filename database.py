@@ -129,6 +129,8 @@ TABLE_REGISTRY = {
             avg_cost REAL,            -- 加權平均成本
             total_net_volume INTEGER, -- 區間淨張數
             concentration REAL,       -- 籌碼集中度%
+            window_type TEXT DEFAULT 'legacy', -- rolling / user_custom / legacy
+            window_days INTEGER,      -- 5/20/60 或自訂天數
             PRIMARY KEY (stock_id, start_date, end_date)
         );""",    
     "ingest_log": """
