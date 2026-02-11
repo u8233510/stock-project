@@ -5,6 +5,7 @@ import database
 import json
 import requests
 import plotly.graph_objects as go
+from weighted_cost_utils import compute_interval_metrics
 
 
 def _call_nim(cfg, messages, temperature=0.0, max_tokens=2000):
@@ -48,31 +49,7 @@ def color_volume(val):
 
 
 def _compute_interval_metrics(df, top_n=15):
-    if df is None or df.empty:
-        return 0.0, 0, 0.0
-
-    work = df.copy()
-    work["buy"] = pd.to_numeric(work["buy"], errors="coerce").fillna(0)
-    work["sell"] = pd.to_numeric(work["sell"], errors="coerce").fillna(0)
-    work["price"] = pd.to_numeric(work["price"], errors="coerce")
-    work = work.dropna(subset=["price"])
-    if work.empty:
-        return 0.0, 0, 0.0
-
-    total_buy = float(work["buy"].sum())
-    total_net = int((work["buy"] - work["sell"]).sum())
-    avg_cost = round(float((work["price"] * work["buy"]).sum() / total_buy), 2) if total_buy > 0 else 0.0
-
-    if "securities_trader_id" not in work.columns:
-        return avg_cost, total_net, 0.0
-
-    trader_net_df = work.groupby("securities_trader_id", dropna=False)[["buy", "sell"]].sum()
-    trader_net = trader_net_df["buy"] - trader_net_df["sell"]
-    n = max(1, int(top_n or 15))
-    top_buy = float(trader_net.nlargest(n).clip(lower=0).sum())
-    top_sell_abs = float(abs(trader_net.nsmallest(n).clip(upper=0).sum()))
-    concentration = round(((top_buy - top_sell_abs) / total_buy) * 100, 2) if total_buy > 0 else 0.0
-    return avg_cost, total_net, concentration
+    return compute_interval_metrics(df, top_n=top_n)
 
 
 def _upsert_interval_metrics(conn, sid, start_date, end_date, avg_cost, total_net_volume, concentration):

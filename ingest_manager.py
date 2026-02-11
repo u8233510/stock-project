@@ -5,6 +5,7 @@ import pandas as pd
 from FinMind.data import DataLoader
 
 import database
+from weighted_cost_utils import compute_interval_metrics
 
 
 def _ensure_data_ingest_log_table(conn):
@@ -73,43 +74,7 @@ BRANCH_WEIGHTED_COST_WINDOWS = (5, 20, 60)
 
 def _compute_branch_weighted_cost_from_period_df(df, top_n=15):
     """從區間 branch 明細計算平均成本、淨張數與籌碼集中度。"""
-    if df is None or df.empty:
-        return 0.0, 0, 0.0
-
-    work = df.copy()
-    for col in ["buy", "sell", "price"]:
-        if col not in work.columns:
-            return 0.0, 0, 0.0
-
-    work["buy"] = pd.to_numeric(work["buy"], errors="coerce").fillna(0)
-    work["sell"] = pd.to_numeric(work["sell"], errors="coerce").fillna(0)
-    work["price"] = pd.to_numeric(work["price"], errors="coerce")
-    work = work.dropna(subset=["price"])
-    if work.empty:
-        return 0.0, 0, 0.0
-
-    total_buy_volume = float(work["buy"].sum())
-    total_net_volume = int((work["buy"] - work["sell"]).sum())
-
-    avg_cost = 0.0
-    if total_buy_volume > 0:
-        avg_cost = round(float((work["price"] * work["buy"]).sum() / total_buy_volume), 2)
-
-    trader_col = "securities_trader_id" if "securities_trader_id" in work.columns else "securities_trader"
-    if trader_col not in work.columns:
-        concentration = 0.0
-    else:
-        trader_net = work.groupby(trader_col, dropna=False)[["buy", "sell"]].sum()
-        trader_net = trader_net["buy"] - trader_net["sell"]
-        if trader_net.empty or total_buy_volume <= 0:
-            concentration = 0.0
-        else:
-            n = max(1, int(top_n or 15))
-            top_buy = float(trader_net.nlargest(n).clip(lower=0).sum())
-            top_sell_abs = float(abs(trader_net.nsmallest(n).clip(upper=0).sum()))
-            concentration = round(((top_buy - top_sell_abs) / total_buy_volume) * 100, 2)
-
-    return avg_cost, total_net_volume, concentration
+    return compute_interval_metrics(df, top_n=top_n)
 
 
 def _upsert_branch_weighted_cost(
