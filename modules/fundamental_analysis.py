@@ -4,6 +4,64 @@ import database
 import requests
 from duckduckgo_search import DDGS
 
+
+def _build_fundamental_prompt(stock_name, sid, search_ctx, metrics):
+    """建立固定章節格式的基本面分析 Prompt。"""
+    return f"""
+請你扮演台股資深基本面分析師，針對 {stock_name}（{sid}）撰寫報告。
+
+【重要規則】
+1) 嚴格使用以下固定格式與標題順序，不要增減章節。
+2) 若資料不足，請明確寫「未提供」或「資料不足」，禁止虛構。
+3) 所有數值盡量引用我提供的資料；若引用新聞，僅能使用「搜尋事實摘要」。
+4) 以繁體中文輸出。
+
+【固定輸出格式】
+## 公司簡介
+（公司定位、核心產品/服務、主要市場）
+
+## 財務分析
+（整體獲利能力與近況，2-4 句）
+
+### 財務指標
+- EPS：
+- ROE（股東權益報酬率）：
+- ROA（資產報酬率）：
+- 營收成長率：
+- 毛利率：
+
+## 營收分析
+（營收趨勢、可能驅動因子）
+
+## 毛利率分析
+（毛利率水準與可能原因；若無資料請寫未提供）
+
+## 現金流量分析
+（現金流量狀況與品質；若無資料請寫未提供）
+
+## 投資評價
+- 短期評價：
+- 中期評價：
+- 長期評價：
+- 目標價格：
+
+## 風險評估
+- 市場風險：
+- 財務風險：
+- 法規/政策風險：
+
+## 結論
+（總結投資觀點與關鍵追蹤指標）
+
+【可用資料】
+- 搜尋事實摘要：{search_ctx if search_ctx else '未提供'}
+- 最新季度 EPS：{metrics.get('latest_eps', '未提供')}
+- 上季 EPS：{metrics.get('prev_eps', '未提供')}
+- 近 12 月最新營收（億元）：{metrics.get('latest_revenue', '未提供')}
+- 近 12 月最舊營收（億元）：{metrics.get('oldest_revenue', '未提供')}
+- 估算營收成長率（最新 vs 最舊）：{metrics.get('revenue_growth', '未提供')}
+""".strip()
+
 # 1. 核心 AI 呼叫工具 (保持穩定，未更動)
 def _call_nim_fundamental(cfg, prompt):
     llm_cfg = cfg.get("llm", {})
@@ -106,8 +164,29 @@ def show_fundamental_analysis():
                 except: pass
                 
                 # 獲取 AI 參考數據
-                latest_eps = profit_df['EPS'].iloc[0] if 'EPS' in profit_df.columns else "N/A"
-                prompt = f"分析台股標的 {selected_stock} ({sid})。搜尋到的新聞事實：{search_ctx}。財務數據：最新季度 EPS 為 {latest_eps}。請產出深度診斷報告。"
+                latest_eps = profit_df['EPS'].iloc[0] if ('EPS' in profit_df.columns and not profit_df.empty) else "未提供"
+                prev_eps = profit_df['EPS'].iloc[1] if ('EPS' in profit_df.columns and len(profit_df) > 1) else "未提供"
+
+                latest_revenue = rev_df['營收(億)'].iloc[0] if not rev_df.empty else "未提供"
+                oldest_revenue = rev_df['營收(億)'].iloc[-1] if not rev_df.empty else "未提供"
+
+                revenue_growth = "未提供"
+                if not rev_df.empty and len(rev_df) > 1:
+                    rev_num = pd.to_numeric(rev_df['營收(億)'].str.replace(',', ''), errors='coerce')
+                    latest_rev_num = rev_num.iloc[0]
+                    oldest_rev_num = rev_num.iloc[-1]
+                    if pd.notnull(latest_rev_num) and pd.notnull(oldest_rev_num) and oldest_rev_num != 0:
+                        revenue_growth = f"{((latest_rev_num - oldest_rev_num) / oldest_rev_num) * 100:.2f}%"
+
+                metrics = {
+                    "latest_eps": latest_eps,
+                    "prev_eps": prev_eps,
+                    "latest_revenue": latest_revenue,
+                    "oldest_revenue": oldest_revenue,
+                    "revenue_growth": revenue_growth
+                }
+
+                prompt = _build_fundamental_prompt(selected_stock, sid, search_ctx, metrics)
                 st.markdown(_call_nim_fundamental(cfg, prompt))
 
     conn.close()
