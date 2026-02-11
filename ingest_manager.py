@@ -58,8 +58,11 @@ def upsert_data(conn, table, df):
     conn.commit()
 
 
-def _compute_branch_weighted_cost_from_daily_df(df):
-    """從單日 branch 明細計算加權成本中繼指標。"""
+BRANCH_WEIGHTED_COST_WINDOWS = (5, 20, 60)
+
+
+def _compute_branch_weighted_cost_from_period_df(df, top_n=15):
+    """從區間 branch 明細計算平均成本、淨張數與籌碼集中度。"""
     if df is None or df.empty:
         return 0.0, 0, 0.0
 
@@ -75,35 +78,33 @@ def _compute_branch_weighted_cost_from_daily_df(df):
     if work.empty:
         return 0.0, 0, 0.0
 
-    work["net"] = work["buy"] - work["sell"]
-    total_vol = float(work["buy"].sum())
-    total_net_volume = int(work["net"].sum())
+    total_buy_volume = float(work["buy"].sum())
+    total_net_volume = int((work["buy"] - work["sell"]).sum())
 
-    grouped = work.groupby("securities_trader", dropna=False, as_index=False).agg(net=("net", "sum"))
+    avg_cost = 0.0
+    if total_buy_volume > 0:
+        avg_cost = round(float((work["price"] * work["buy"]).sum() / total_buy_volume), 2)
 
-    weighted_vals = (work["net"] * work["price"]).groupby(work["securities_trader"], dropna=False).sum()
-    net_vals = work["net"].groupby(work["securities_trader"], dropna=False).sum()
+    trader_col = "securities_trader_id" if "securities_trader_id" in work.columns else "securities_trader"
+    if trader_col not in work.columns:
+        concentration = 0.0
+    else:
+        trader_net = (
+            work.groupby(trader_col, dropna=False)
+            .apply(lambda g: float(g["buy"].sum() - g["sell"].sum()))
+        )
+        if trader_net.empty or total_buy_volume <= 0:
+            concentration = 0.0
+        else:
+            n = max(1, int(top_n or 15))
+            top_buy = float(trader_net.nlargest(n).clip(lower=0).sum())
+            top_sell_abs = float(abs(trader_net.nsmallest(n).clip(upper=0).sum()))
+            concentration = round(((top_buy - top_sell_abs) / total_buy_volume) * 100, 2)
 
-    avg_map = {}
-    for k, net in net_vals.items():
-        if net != 0:
-            avg_map[k] = float(round(weighted_vals.get(k, 0.0) / net, 2))
-
-    grouped["avg_price"] = grouped["securities_trader"].map(avg_map)
-    grouped = grouped[(grouped["net"] > 0) & grouped["avg_price"].notna()]
-    grouped = grouped.sort_values("net", ascending=False).head(5)
-
-    if grouped.empty:
-        return 0.0, total_net_volume, 0.0
-
-    total_net_buy = float(grouped["net"].sum())
-    weighted_sum = float((grouped["net"] * grouped["avg_price"]).sum())
-    avg_cost = round(weighted_sum / total_net_buy, 2) if total_net_buy > 0 else 0.0
-    concentration = round((total_net_buy / total_vol) * 100, 2) if total_vol > 0 else 0.0
     return avg_cost, total_net_volume, concentration
 
 
-def _upsert_branch_weighted_cost(conn, stock_id, trade_date, avg_cost, total_net_volume, concentration):
+def _upsert_branch_weighted_cost(conn, stock_id, start_date, end_date, avg_cost, total_net_volume, concentration):
     conn.execute(
         """
         INSERT OR REPLACE INTO branch_weighted_cost(
@@ -113,37 +114,78 @@ def _upsert_branch_weighted_cost(conn, stock_id, trade_date, avg_cost, total_net
         """,
         (
             stock_id,
-            trade_date,
-            trade_date,
+            start_date,
+            end_date,
             float(avg_cost or 0),
             int(total_net_volume or 0),
             float(concentration or 0),
         ),
     )
-    conn.commit()
+
+
+def calculate_and_save_weighted_cost(conn, stock_id, start_date, end_date, top_n=15):
+    """計算特定區間的籌碼統計並存入 branch_weighted_cost。"""
+    period_df = pd.read_sql(
+        """
+        SELECT securities_trader_id, securities_trader, price, buy, sell
+        FROM branch_price_daily
+        WHERE stock_id = ? AND date >= ? AND date <= ?
+        """,
+        conn,
+        params=(stock_id, start_date, end_date),
+    )
+
+    if period_df.empty:
+        conn.execute(
+            "DELETE FROM branch_weighted_cost WHERE stock_id = ? AND start_date = ? AND end_date = ?",
+            (stock_id, start_date, end_date),
+        )
+        return False
+
+    avg_cost, total_net_volume, concentration = _compute_branch_weighted_cost_from_period_df(period_df, top_n=top_n)
+    _upsert_branch_weighted_cost(conn, stock_id, start_date, end_date, avg_cost, total_net_volume, concentration)
+    return True
 
 
 def _refresh_branch_weighted_cost_for_trade_date(conn, stock_id, trade_date):
-    """每次寫入 branch_price_daily 後，直接以當日資料重算 branch_weighted_cost。"""
-    day_df = pd.read_sql(
-        """
-        SELECT securities_trader, buy, sell, price
-        FROM branch_price_daily
-        WHERE stock_id = ? AND date = ?
-        """,
-        conn,
-        params=(stock_id, trade_date),
-    )
-    if day_df.empty:
+    """每次寫入 branch_price_daily 後，重算指定 end_date 的區間加權成本。"""
+    day_exists = conn.execute(
+        "SELECT 1 FROM branch_price_daily WHERE stock_id = ? AND date = ? LIMIT 1",
+        (stock_id, trade_date),
+    ).fetchone()
+    if not day_exists:
         conn.execute(
-            "DELETE FROM branch_weighted_cost WHERE stock_id = ? AND start_date = ? AND end_date = ?",
-            (stock_id, trade_date, trade_date),
+            "DELETE FROM branch_weighted_cost WHERE stock_id = ? AND end_date = ?",
+            (stock_id, trade_date),
         )
         conn.commit()
         return
 
-    avg_cost, total_net_volume, concentration = _compute_branch_weighted_cost_from_daily_df(day_df)
-    _upsert_branch_weighted_cost(conn, stock_id, trade_date, avg_cost, total_net_volume, concentration)
+    conn.execute(
+        "DELETE FROM branch_weighted_cost WHERE stock_id = ? AND end_date = ?",
+        (stock_id, trade_date),
+    )
+
+    for window in BRANCH_WEIGHTED_COST_WINDOWS:
+        trade_dates = conn.execute(
+            """
+            SELECT DISTINCT date
+            FROM branch_price_daily
+            WHERE stock_id = ? AND date <= ?
+            ORDER BY date DESC
+            LIMIT ?
+            """,
+            (stock_id, trade_date, int(window)),
+        ).fetchall()
+
+        dates = sorted([str(r[0])[:10] for r in trade_dates if r and r[0]])
+        if not dates:
+            continue
+
+        period_start = dates[0]
+        calculate_and_save_weighted_cost(conn, stock_id, period_start, trade_date, top_n=15)
+
+    conn.commit()
 
 
 def _sync_branch_weighted_cost_gaps(conn, stock_id, start_date, end_date=None):
@@ -151,19 +193,20 @@ def _sync_branch_weighted_cost_gaps(conn, stock_id, start_date, end_date=None):
     end_date = end_date or datetime.now().strftime("%Y-%m-%d")
     rows = conn.execute(
         """
-        SELECT DISTINCT b.date
-        FROM branch_price_daily b
+        SELECT b.date
+        FROM (
+            SELECT DISTINCT date
+            FROM branch_price_daily
+            WHERE stock_id = ? AND date >= ? AND date <= ?
+        ) b
         LEFT JOIN branch_weighted_cost w
-          ON w.stock_id = b.stock_id
-         AND w.start_date = b.date
+          ON w.stock_id = ?
          AND w.end_date = b.date
-        WHERE b.stock_id = ?
-          AND b.date >= ?
-          AND b.date <= ?
-          AND w.stock_id IS NULL
+        GROUP BY b.date
+        HAVING COUNT(w.start_date) < ?
         ORDER BY b.date
         """,
-        (stock_id, start_date, end_date),
+        (stock_id, start_date, end_date, stock_id, len(BRANCH_WEIGHTED_COST_WINDOWS)),
     ).fetchall()
 
     missing_dates = [str(r[0])[:10] for r in rows if r and r[0]]
