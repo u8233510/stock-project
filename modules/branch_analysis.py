@@ -109,13 +109,18 @@ def _load_window_snapshot(conn, sid, window):
     ).fetchone()
 
 
+
+
+def _format_snapshot_caption(row):
+    return f"淨張數: {int(row[1])} | 集中度: {float(row[2]):.2f}% | 截止日: {row[3]}"
+
+
 def show_branch_analysis():
     st.markdown("### 🔍 專業級分點籌碼與產業聯動診斷")
     cfg = database.load_config()
     conn = database.get_db_connection(cfg)
     universe = cfg.get("universe", [])
     stock_options = {f"{s['stock_id']} {s['name']}": s['stock_id'] for s in universe}
-    id_to_name = {s['stock_id']: s['name'] for s in universe}
 
     c1, c2, c3, c4, c5 = st.columns([1.7, 1.5, 1.1, 0.7, 1.2])
     with c1:
@@ -190,7 +195,7 @@ def show_branch_analysis():
             with col:
                 if row:
                     st.metric(f"{window}日均價成本", f"${row[0]:.2f}")
-                    st.caption(f"淨張數: {int(row[1])} | 集中度: {float(row[2]):.2f}% | 截止日: {row[3]}")
+                    st.caption(_format_snapshot_caption(row))
                 else:
                     st.metric(f"{window}日均價成本", "N/A")
                     st.caption("尚無快照")
