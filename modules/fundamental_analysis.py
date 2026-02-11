@@ -4,6 +4,143 @@ import database
 import requests
 from duckduckgo_search import DDGS
 
+PUTER_JS_SNIPPET = """<script src="https://js.puter.com/v2/"></script>
+<script>
+async function runPuterDemo() {
+  try {
+    const response = await puter.ai.chat(
+      "量子運算的最新進展是什麼？",
+      { model: "perplexity/sonar" }
+    );
+    console.log(response);
+  } catch (err) {
+    console.error("Puter 呼叫失敗:", err);
+  }
+}
+runPuterDemo();
+</script>
+"""
+
+
+def _google_search(query, cfg, max_results=5):
+    """透過 Google Custom Search 取得搜尋摘要。"""
+    search_cfg = cfg.get("search", {})
+    api_key = search_cfg.get("google_api_key")
+    cse_id = search_cfg.get("google_cse_id")
+    if not api_key or not cse_id:
+        return []
+
+    try:
+        resp = requests.get(
+            "https://www.googleapis.com/customsearch/v1",
+            params={
+                "key": api_key,
+                "cx": cse_id,
+                "q": query,
+                "num": min(max_results, 10),
+                "hl": "zh-TW"
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        items = resp.json().get("items", [])
+        return [
+            {
+                "source": "Google",
+                "title": i.get("title", ""),
+                "snippet": i.get("snippet", ""),
+                "url": i.get("link", ""),
+            }
+            for i in items
+        ]
+    except Exception:
+        return []
+
+
+def _perplexity_search(query, cfg):
+    """透過 Perplexity API 取得外部資訊摘要。"""
+    search_cfg = cfg.get("search", {})
+    api_key = search_cfg.get("perplexity_api_key")
+    model = search_cfg.get("perplexity_model", "sonar")
+    if not api_key:
+        return []
+
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "你是研究助理，請根據最新網路公開資訊整理重點，並附上來源網址。",
+            },
+            {
+                "role": "user",
+                "content": f"請針對以下主題整理 5 點重點，格式為一行一點，且每點附來源網址：{query}",
+            },
+        ],
+        "temperature": 0.0,
+    }
+
+    try:
+        resp = requests.post(
+            "https://api.perplexity.ai/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+        return [{"source": "Perplexity", "title": "摘要", "snippet": content, "url": ""}]
+    except Exception:
+        return []
+
+
+def _ddg_search(query, max_results=5, source="DuckDuckGo"):
+    try:
+        with DDGS() as ddgs:
+            results = []
+            for r in ddgs.text(query, max_results=max_results):
+                results.append(
+                    {
+                        "source": source,
+                        "title": r.get("title", ""),
+                        "snippet": r.get("body", ""),
+                        "url": r.get("href", ""),
+                    }
+                )
+            return results
+    except Exception:
+        return []
+
+
+def _build_external_context(stock_name, sid, cfg):
+    """蒐集外部資訊（Perplexity / Google / DDG / 社群網站搜尋）。"""
+    base_query = f"{stock_name} {sid} 核心產品 產業地位 最新新聞"
+
+    records = []
+    records.extend(_perplexity_search(base_query, cfg))
+    records.extend(_google_search(base_query, cfg, max_results=5))
+    records.extend(_ddg_search(base_query, max_results=5, source="DuckDuckGo"))
+
+    # 社群/輿情（以公開可索引頁面為主，非登入資料）
+    social_queries = [
+        (f"site:x.com OR site:twitter.com {stock_name} {sid}", "X/Twitter"),
+        (f"site:facebook.com {stock_name} {sid}", "Facebook"),
+        (f"site:instagram.com {stock_name} {sid}", "Instagram"),
+    ]
+    for query, source in social_queries:
+        records.extend(_ddg_search(query, max_results=3, source=source))
+
+    if not records:
+        return "", ["目前未取得外部來源。你可直接使用免金鑰的 DDG/社群搜尋；若要提升品質，再於 config.json 的 search 區段設定 Perplexity/Google API key（選填）。"]
+
+    lines = []
+    for rec in records[:20]:
+        url = rec.get("url", "")
+        url_text = f"（{url}）" if url else ""
+        lines.append(f"- [{rec.get('source', '來源')}] {rec.get('title', '')}: {rec.get('snippet', '')} {url_text}")
+    return "\n".join(lines), []
+
 
 def _build_fundamental_prompt(stock_name, sid, search_ctx, metrics):
     """建立固定章節格式的基本面分析 Prompt。"""
@@ -153,15 +290,19 @@ def show_fundamental_analysis():
             st.info("尚無股利歷史數據。")
 
     with tab3:
+        st.info("💡 外部資訊來源說明：目前後端已整合 Google / Perplexity（需選填 API key）與 DDG/社群公開頁面（免 key）。")
+        with st.expander("Puter.js 免 API Key 使用方式（前端範例）", expanded=False):
+            st.markdown("可以直接這樣寫，但建議用 `async/await + try/catch`（如下）較容易除錯。")
+            st.code(PUTER_JS_SNIPPET, language="html")
+            st.markdown("支援模型示例：`perplexity/sonar`、`perplexity/sonar-pro`、`perplexity/sonar-deep-research`、`perplexity/sonar-reasoning-pro`。")
+
         # ✅ 保留聯網搜尋邏輯
         if st.button(f"🚀 啟動 {selected_stock} 聯網事實分析", use_container_width=True):
             with st.spinner("正在搜尋最新產業地位與市場新聞..."):
-                search_ctx = ""
-                try:
-                    with DDGS() as ddgs:
-                        for r in ddgs.text(f"{selected_stock} 核心產品 產業地位 最新新聞", max_results=5):
-                            search_ctx += f"\n- {r['title']}: {r['body']}"
-                except: pass
+                search_ctx, search_warnings = _build_external_context(selected_stock, sid, cfg)
+                if search_warnings:
+                    for w in search_warnings:
+                        st.warning(w)
                 
                 # 獲取 AI 參考數據
                 latest_eps = profit_df['EPS'].iloc[0] if ('EPS' in profit_df.columns and not profit_df.empty) else "未提供"
