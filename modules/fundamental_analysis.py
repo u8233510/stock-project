@@ -188,21 +188,11 @@ def _ddg_search(query, max_results=5, source="DuckDuckGo"):
 
 
 def _build_external_context(stock_name, sid, cfg):
-    """蒐集外部資訊（Perplexity / Google / DDG / 社群網站搜尋）。"""
+    """蒐集外部資訊（免費來源：DDG / 社群網站搜尋）。"""
     base_query = f"{stock_name} {sid} 核心產品 產業地位 最新新聞"
 
     records = []
     warnings = []
-
-    per_records, per_warn = _perplexity_search(base_query, cfg)
-    records.extend(per_records)
-    if per_warn:
-        warnings.append(per_warn)
-
-    google_records, google_warn = _google_search(base_query, cfg, max_results=5)
-    records.extend(google_records)
-    if google_warn:
-        warnings.append(google_warn)
 
     ddg_records, ddg_warn = _ddg_search(base_query, max_results=5, source="DuckDuckGo")
     records.extend(ddg_records)
@@ -238,6 +228,101 @@ def _build_external_context(stock_name, sid, cfg):
         url_text = f"（{url}）" if url else ""
         lines.append(f"- [{rec.get('source', '來源')}] {rec.get('title', '')}: {rec.get('snippet', '')} {url_text}")
     return "\n".join(lines), warnings
+
+
+def _fmt_metric(value, fallback="未提供"):
+    if value is None or value == "":
+        return fallback
+    return str(value)
+
+
+def _to_float(value):
+    if value is None:
+        return None
+    text = str(value).replace(",", "").replace("%", "").strip()
+    if text in {"", "未提供", "N/A", "nan"}:
+        return None
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _free_score_label(score):
+    if score >= 2:
+        return "偏多"
+    if score <= -2:
+        return "偏保守"
+    return "中性"
+
+
+def _build_free_fundamental_report(stock_name, sid, search_ctx, metrics):
+    latest_eps = _to_float(metrics.get("latest_eps"))
+    prev_eps = _to_float(metrics.get("prev_eps"))
+    revenue_growth = _to_float(metrics.get("revenue_growth"))
+
+    eps_trend = "資料不足"
+    if latest_eps is not None and prev_eps is not None:
+        eps_trend = "成長" if latest_eps > prev_eps else ("下滑" if latest_eps < prev_eps else "持平")
+
+    score = 0
+    if latest_eps is not None:
+        score += 1 if latest_eps > 0 else -1
+    if revenue_growth is not None:
+        score += 1 if revenue_growth > 0 else -1
+    if latest_eps is not None and prev_eps is not None and latest_eps > prev_eps:
+        score += 1
+
+    risk_note = "市場景氣循環與產業競爭可能影響營收與獲利。"
+    if latest_eps is not None and latest_eps < 0:
+        risk_note = "目前 EPS 為負，需優先關注虧損收斂與現金流品質。"
+    elif revenue_growth is not None and revenue_growth < 0:
+        risk_note = "近期營收成長率為負，需留意需求放緩或產品組合變化。"
+
+    ext_note = "未取得外部新聞摘要。"
+    if search_ctx:
+        ext_note = "已納入 DuckDuckGo 與社群公開頁面摘要（免費來源）。"
+
+    return f"""
+## 公司簡介
+{stock_name}（{sid}）為台股上市櫃公司，本報告採用內部資料庫財報欄位與免費外部搜尋摘要進行整理。
+
+## 財務分析
+目前觀察到 EPS 趨勢為「{eps_trend}」，整體財務動能判讀為「{_free_score_label(score)}」。
+{ext_note}
+
+### 財務指標
+- EPS：{_fmt_metric(metrics.get('latest_eps'))}
+- ROE（股東權益報酬率）：未提供
+- ROA（資產報酬率）：未提供
+- 營收成長率：{_fmt_metric(metrics.get('revenue_growth'))}
+- 毛利率：未提供
+
+## 營收分析
+近 12 月營收由 { _fmt_metric(metrics.get('oldest_revenue')) } 億變化至 { _fmt_metric(metrics.get('latest_revenue')) } 億，成長率為 { _fmt_metric(metrics.get('revenue_growth')) }。
+若成長率轉弱，通常代表終端需求、產品價格或出貨節奏承壓。
+
+## 毛利率分析
+目前資料庫未提供可直接計算的最新毛利率欄位，建議後續補齊季報毛利率以提升判讀精度。
+
+## 現金流量分析
+目前資料庫未提供完整現金流量欄位，本段為資料不足。
+
+## 投資評價
+- 短期評價：{_free_score_label(score)}（以營收與 EPS 最新變化為主）
+- 中期評價：中性偏基本面驗證（需追蹤連續 2~3 季）
+- 長期評價：取決於產品競爭力、資本支出效率與景氣循環位置
+- 目標價格：資料不足（免費版不產生目標價）
+
+## 風險評估
+- 市場風險：受總體景氣、利率與資金面影響
+- 財務風險：{risk_note}
+- 法規/政策風險：需留意產業政策、出口管制與會計準則變動
+
+## 結論
+本次為「免費版 AI 基本面分析」，以可驗證數據做規則化摘要，不使用付費 LLM API。
+建議後續持續追蹤：EPS 連續性、營收年增率轉折、以及重大新聞事件對訂單與毛利率的影響。
+""".strip()
 
 
 def _build_fundamental_prompt(stock_name, sid, search_ctx, metrics):
@@ -388,26 +473,10 @@ def show_fundamental_analysis():
             st.info("尚無股利歷史數據。")
 
     with tab3:
-        st.info("💡 外部資訊來源說明：目前後端已整合 Google / Perplexity / DDG / 社群公開頁面，並顯示各來源診斷訊息。若 Google 回報 key 無效，通常是 API 啟用或金鑰限制問題。")
-        with st.expander("Puter.js 免 API Key 使用方式（前端範例）", expanded=False):
-            st.markdown("可以直接這樣寫，但建議用 `async/await + try/catch`（如下）較容易除錯。")
-            st.code(PUTER_JS_SNIPPET, language="html")
-            st.markdown("支援模型示例：`perplexity/sonar`、`perplexity/sonar-pro`、`perplexity/sonar-deep-research`、`perplexity/sonar-reasoning-pro`。")
-
-        with st.expander("Google API 設定診斷", expanded=False):
-            st.caption("僅顯示遮罩後資訊，協助確認程式讀到的設定值是否正確。")
-            st.write(f"- google_api_key: `{_mask_secret(cfg.get('search', {}).get('google_api_key'))}`")
-            st.write(f"- google_cse_id: `{_mask_secret(cfg.get('search', {}).get('google_cse_id'))}`")
-            st.caption("若你在 Google Console 已看到 API 啟用，但仍報 key 無效，常見是：金鑰來自不同專案、金鑰限制（HTTP referrer/IP）不符、或剛建立尚未生效。")
-            if st.button("🧪 測試 Google CSE 連線", use_container_width=True):
-                ok, msg = _google_connectivity_check(cfg)
-                if ok:
-                    st.success(msg)
-                else:
-                    st.warning(msg)
+        st.info("💡 已切換為免費模式：AI 基本面報告只使用本地規則 + DuckDuckGo/社群公開搜尋，不再呼叫付費 LLM。")
 
         # ✅ 保留聯網搜尋邏輯
-        if st.button(f"🚀 啟動 {selected_stock} 聯網事實分析", use_container_width=True):
+        if st.button(f"🚀 啟動 {selected_stock} 免費 AI 基本面分析", use_container_width=True):
             with st.spinner("正在搜尋最新產業地位與市場新聞..."):
                 search_ctx, search_warnings = _build_external_context(selected_stock, sid, cfg)
                 if search_warnings:
@@ -440,7 +509,6 @@ def show_fundamental_analysis():
                     "revenue_growth": revenue_growth
                 }
 
-                prompt = _build_fundamental_prompt(selected_stock, sid, search_ctx, metrics)
-                st.markdown(_call_nim_fundamental(cfg, prompt))
+                st.markdown(_build_free_fundamental_report(selected_stock, sid, search_ctx, metrics))
 
     conn.close()
