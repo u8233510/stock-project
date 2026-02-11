@@ -187,30 +187,54 @@ def _ddg_search(query, max_results=5, source="DuckDuckGo"):
         return [], f"{source} 搜尋例外：{str(exc)}"
 
 
+def _build_search_queries(stock_name, sid):
+    """建立多角度查詢，讓免費聯網摘要更接近可搜尋 LLM 的效果。"""
+    base = f"{stock_name} {sid}"
+    return [
+        (f"{base} 公司簡介 核心產品 產業地位", "公司定位"),
+        (f"{base} 最新新聞 訂單 客戶", "最新動態"),
+        (f"{base} 法說會 財測 資本支出 毛利率", "經營展望"),
+        (f"{base} 風險 匯率 原物料 地緣政治", "風險事件"),
+    ]
+
+
+def _dedup_records(records):
+    seen = set()
+    deduped = []
+    for rec in records:
+        key = (rec.get("source", ""), rec.get("title", ""), rec.get("url", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(rec)
+    return deduped
+
+
 def _build_external_context(stock_name, sid, cfg):
     """蒐集外部資訊（可配置付費/免費來源 + 社群網站搜尋）。"""
-    base_query = f"{stock_name} {sid} 核心產品 產業地位 最新新聞"
     search_cfg = cfg.get("search", {})
     preferred_provider = str(search_cfg.get("provider", "ddg")).lower().strip()
 
     records = []
     warnings = []
+    topic_queries = _build_search_queries(stock_name, sid)
 
-    if preferred_provider == "google":
-        google_records, google_warn = _google_search(base_query, cfg, max_results=6)
-        records.extend(google_records)
-        if google_warn:
-            warnings.append(google_warn)
-    elif preferred_provider == "perplexity":
-        pplx_records, pplx_warn = _perplexity_search(base_query, cfg)
-        records.extend(pplx_records)
-        if pplx_warn:
-            warnings.append(pplx_warn)
+    for query, tag in topic_queries:
+        if preferred_provider == "google":
+            google_records, google_warn = _google_search(query, cfg, max_results=3)
+            records.extend(google_records)
+            if google_warn:
+                warnings.append(f"[{tag}] {google_warn}")
+        elif preferred_provider == "perplexity":
+            pplx_records, pplx_warn = _perplexity_search(query, cfg)
+            records.extend(pplx_records)
+            if pplx_warn:
+                warnings.append(f"[{tag}] {pplx_warn}")
 
-    ddg_records, ddg_warn = _ddg_search(base_query, max_results=5, source="DuckDuckGo")
-    records.extend(ddg_records)
-    if ddg_warn:
-        warnings.append(ddg_warn)
+        ddg_records, ddg_warn = _ddg_search(query, max_results=3, source=f"DuckDuckGo/{tag}")
+        records.extend(ddg_records)
+        if ddg_warn:
+            warnings.append(f"[{tag}] {ddg_warn}")
 
     # 社群/輿情（以公開可索引頁面為主，非登入資料）
     social_queries = [
@@ -219,11 +243,12 @@ def _build_external_context(stock_name, sid, cfg):
         (f"site:instagram.com {stock_name} {sid}", "Instagram"),
     ]
     for query, source in social_queries:
-        social_records, social_warn = _ddg_search(query, max_results=3, source=source)
+        social_records, social_warn = _ddg_search(query, max_results=2, source=source)
         records.extend(social_records)
         if social_warn:
             warnings.append(social_warn)
 
+    records = _dedup_records(records)
     if not records:
         warnings.insert(0, "目前未取得外部來源。請先檢查下方各來源診斷訊息。")
         return "", warnings
@@ -236,7 +261,7 @@ def _build_external_context(stock_name, sid, cfg):
     warnings.insert(0, f"外部來源抓取成功（{summary}）。")
 
     lines = []
-    for rec in records[:20]:
+    for rec in records[:24]:
         url = rec.get("url", "")
         url_text = f"（{url}）" if url else ""
         lines.append(f"- [{rec.get('source', '來源')}] {rec.get('title', '')}: {rec.get('snippet', '')} {url_text}")
@@ -392,7 +417,8 @@ def _build_fundamental_prompt(stock_name, sid, search_ctx, metrics):
 1) 嚴格使用以下固定格式與標題順序，不要增減章節。
 2) 若資料不足，請明確寫「未提供」或「資料不足」，禁止虛構。
 3) 所有數值盡量引用我提供的資料；若引用新聞，僅能使用「搜尋事實摘要」。
-4) 以繁體中文輸出。
+4) 若有外部事件，請在句尾加上對應來源網址（可多筆）。
+5) 以繁體中文輸出。
 
 【固定輸出格式】
 ## 公司簡介
@@ -581,7 +607,7 @@ def show_fundamental_analysis():
 
         if llm_available:
             st.success(f"✅ 已偵測到 llm.api_key（{_mask_secret(llm_cfg.get('api_key'))}），可直接使用 {model_name} 進行強化分析。")
-        st.info("💡 改善建議：若要提高基本面品質，請補齊 ROE/ROA/毛利率/現金流欄位，並搭配 LLM 做交叉判讀。")
+        st.info("💡 改善建議：系統會先做多查詢聯網蒐集，再交給 LLM 整合；效果會比只靠模型記憶好。")
 
         run_btn_label = "🚀 啟動 AI 基本面分析（LLM 強化）" if use_llm else "🚀 啟動 AI 基本面分析（免費規則化）"
         # ✅ 保留聯網搜尋邏輯
