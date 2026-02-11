@@ -45,6 +45,70 @@ def color_volume(val):
     color = 'red' if val > 0 else 'green'
     return f'color: {color}; font-weight: bold'
 
+
+
+def _compute_interval_metrics(df, top_n=15):
+    if df is None or df.empty:
+        return 0.0, 0, 0.0
+
+    work = df.copy()
+    work["buy"] = pd.to_numeric(work["buy"], errors="coerce").fillna(0)
+    work["sell"] = pd.to_numeric(work["sell"], errors="coerce").fillna(0)
+    work["price"] = pd.to_numeric(work["price"], errors="coerce")
+    work = work.dropna(subset=["price"])
+    if work.empty:
+        return 0.0, 0, 0.0
+
+    total_buy = float(work["buy"].sum())
+    total_net = int((work["buy"] - work["sell"]).sum())
+    avg_cost = round(float((work["price"] * work["buy"]).sum() / total_buy), 2) if total_buy > 0 else 0.0
+
+    if "securities_trader_id" not in work.columns:
+        return avg_cost, total_net, 0.0
+
+    trader_net_df = work.groupby("securities_trader_id", dropna=False)[["buy", "sell"]].sum()
+    trader_net = trader_net_df["buy"] - trader_net_df["sell"]
+    n = max(1, int(top_n or 15))
+    top_buy = float(trader_net.nlargest(n).clip(lower=0).sum())
+    top_sell_abs = float(abs(trader_net.nsmallest(n).clip(upper=0).sum()))
+    concentration = round(((top_buy - top_sell_abs) / total_buy) * 100, 2) if total_buy > 0 else 0.0
+    return avg_cost, total_net, concentration
+
+
+def _upsert_interval_metrics(conn, sid, start_date, end_date, avg_cost, total_net_volume, concentration):
+    window_days = (pd.to_datetime(end_date).date() - pd.to_datetime(start_date).date()).days + 1
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO branch_weighted_cost
+        (stock_id, start_date, end_date, avg_cost, total_net_volume, concentration, window_type, window_days)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            sid,
+            str(start_date),
+            str(end_date),
+            float(avg_cost or 0),
+            int(total_net_volume or 0),
+            float(concentration or 0),
+            "user_custom",
+            int(window_days),
+        ),
+    )
+
+
+def _load_window_snapshot(conn, sid, window):
+    return conn.execute(
+        """
+        SELECT avg_cost, total_net_volume, concentration, end_date
+        FROM branch_weighted_cost
+        WHERE stock_id = ? AND window_type = 'rolling' AND window_days = ?
+        ORDER BY end_date DESC
+        LIMIT 1
+        """,
+        (sid, int(window)),
+    ).fetchone()
+
+
 def show_branch_analysis():
     st.markdown("### 🔍 專業級分點籌碼與產業聯動診斷")
     cfg = database.load_config()
@@ -53,7 +117,7 @@ def show_branch_analysis():
     stock_options = {f"{s['stock_id']} {s['name']}": s['stock_id'] for s in universe}
     id_to_name = {s['stock_id']: s['name'] for s in universe}
 
-    c1, c2, c3, c4 = st.columns([1.8, 1.5, 1, 0.7])
+    c1, c2, c3, c4, c5 = st.columns([1.7, 1.5, 1.1, 0.7, 1.2])
     with c1:
         sid_label = st.selectbox("分析標的", list(stock_options.keys()), label_visibility="collapsed")
         sid = stock_options[sid_label]
@@ -66,6 +130,8 @@ def show_branch_analysis():
         analyze_btn = st.button("🚀 執行", use_container_width=True)
     with c4:
         if st.button("🔄", use_container_width=True): st.rerun()
+    with c5:
+        top_n = st.number_input("買賣超分點家數", min_value=1, max_value=50, value=15, step=1)
 
     ind_cols = database.get_table_columns(conn, "stock_industry_chain")
     industry_col = database.match_column(ind_cols, ["industry"]) 
@@ -77,8 +143,8 @@ def show_branch_analysis():
     st.info(f"📍 當前標的：**{sid_label}** | 所屬產業鏈：**{industry_name}**")
 
     if not (isinstance(date_range, (list, tuple)) and len(date_range) == 2): return
-    start_d, end_d = date_range[0], date_range[1]
-    date_sql = f"date BETWEEN '{start_d}' AND '{end_d}'"
+    start_d, end_d = pd.to_datetime(date_range[0]).date(), pd.to_datetime(date_range[1]).date()
+    date_sql = f"date BETWEEN '{start_d.isoformat()}' AND '{end_d.isoformat()}'"
 
     try:
         current_price = conn.execute(f"SELECT close FROM stock_ohlcv_daily WHERE stock_id='{sid}' ORDER BY date DESC LIMIT 1").fetchone()[0] or 0
@@ -92,15 +158,20 @@ def show_branch_analysis():
         """, conn)
         df['獲利%'] = (((current_price - df['均價']) / df['均價']) * 100).round(2)
 
-        df_top_buyers = df[df['淨張數'] > 0].head(5)
-        main_force_cost = 0
-        chip_concentration = 0
-        if not df_top_buyers.empty:
-            total_net_buy = df_top_buyers['淨張數'].sum()
-            weighted_sum = (df_top_buyers['淨張數'] * df_top_buyers['均價']).sum()
-            main_force_cost = round(weighted_sum / total_net_buy, 2)
-            chip_concentration = round((total_net_buy / total_vol) * 100, 2)
+        interval_df = pd.read_sql(
+            """
+            SELECT securities_trader_id, price, buy, sell
+            FROM branch_price_daily
+            WHERE stock_id = ? AND date >= ? AND date <= ?
+            """,
+            conn,
+            params=(sid, start_d.isoformat(), end_d.isoformat()),
+        )
+        main_force_cost, total_net_volume, chip_concentration = _compute_interval_metrics(interval_df, top_n=top_n)
 
+        if analyze_btn:
+            _upsert_interval_metrics(conn, sid, start_d.isoformat(), end_d.isoformat(), main_force_cost, total_net_volume, chip_concentration)
+            conn.commit()
 
         m1, m2, m3 = st.columns(3)
         with m1: st.metric("核心主力加權成本", f"${main_force_cost}")
@@ -112,6 +183,18 @@ def show_branch_analysis():
         if chip_concentration > 30:
             st.error(f"⚠️ 偵測到籌碼異常集中！前五大分點買超佔比達 {chip_concentration}%")
         
+        st.caption("最新 rolling 快照：5日 / 20日 / 60日")
+        w1, w2, w3 = st.columns(3)
+        for col, window in zip([w1, w2, w3], [5, 20, 60]):
+            row = _load_window_snapshot(conn, sid, window)
+            with col:
+                if row:
+                    st.metric(f"{window}日均價成本", f"${row[0]:.2f}")
+                    st.caption(f"淨張數: {int(row[1])} | 集中度: {float(row[2]):.2f}% | 截止日: {row[3]}")
+                else:
+                    st.metric(f"{window}日均價成本", "N/A")
+                    st.caption("尚無快照")
+
         col_left, col_right = st.columns([5, 5])
         with col_left:
             st.write("🏦 **Top 20 進出分點盈虧**")
