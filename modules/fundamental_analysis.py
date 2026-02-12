@@ -1,10 +1,7 @@
 from datetime import datetime
 
 import streamlit as st
-try:
-    from ddgs import DDGS
-except Exception:
-    from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 import database
 
@@ -34,7 +31,7 @@ def render_stock_news(sid: str, sname: str):
             with DDGS() as ddgs:
                 for query in queries:
                     results = ddgs.news(
-                        keywords=query,
+                        query,
                         region="wt-wt",
                         safesearch="off",
                         timelimit=timelimit,
