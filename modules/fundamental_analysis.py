@@ -154,59 +154,105 @@ def _build_queries(sid: str, sname: str) -> list[str]:
     ]
 
 
+def _normalize_news_item(item: dict, default_source: str = "") -> dict[str, Any]:
+    """統一不同來源欄位命名，方便後續去重與排序。"""
+    return {
+        "title": item.get("title", ""),
+        "body": item.get("body", "") or item.get("snippet", ""),
+        "url": item.get("url", "") or item.get("href", "") or item.get("link", ""),
+        "source": item.get("source", default_source),
+        "date": item.get("date", ""),
+    }
+
+
+def _dedupe_news(items: list[dict], default_source: str = "") -> list[dict[str, Any]]:
+    """依 URL（優先）與標題去重，保留第一筆。"""
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for raw in items:
+        item = _normalize_news_item(raw, default_source=default_source)
+        url = str(item.get("url", "")).strip().lower()
+        title = str(item.get("title", "")).strip().lower()
+        dedupe_key = url or f"title:{title}"
+        if not dedupe_key:
+            continue
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        deduped.append(item)
+
+    return deduped
+
+
 def _fetch_dgs_news(sid: str, sname: str, timelimit: str = "y") -> list[dict]:
     queries = _build_queries(sid, sname)
-    news_list: list[dict[str, Any]] = []
+    all_fetched: list[dict[str, Any]] = []
+    all_relevant: list[dict[str, Any]] = []
 
     with DDGS() as ddgs:
-        best_fallback = []
         for query in queries:
             fetched = _search_news(ddgs, query, timelimit)
-            if fetched and not best_fallback:
-                best_fallback = fetched
-
+            all_fetched.extend(fetched)
             relevant = [n for n in fetched if _is_relevant_news(n, sid, sname)]
-            if relevant:
-                news_list = relevant
-                break
+            all_relevant.extend(relevant)
 
-        if not news_list:
-            news_list = best_fallback
+    relevant_sorted = sorted(_dedupe_news(all_relevant, default_source="DGS"), key=_news_sort_key, reverse=True)
+    fetched_sorted = sorted(_dedupe_news(all_fetched, default_source="DGS"), key=_news_sort_key, reverse=True)
 
-    return sorted(news_list, key=_news_sort_key, reverse=True)[:10]
+    if len(relevant_sorted) >= 10:
+        return relevant_sorted[:10]
+
+    used = {str(item.get("url", "")).strip().lower() or str(item.get("title", "")).strip().lower() for item in relevant_sorted}
+    filled = list(relevant_sorted)
+    for item in fetched_sorted:
+        key = str(item.get("url", "")).strip().lower() or str(item.get("title", "")).strip().lower()
+        if key in used:
+            continue
+        used.add(key)
+        filled.append(item)
+        if len(filled) >= 10:
+            break
+
+    return filled[:10]
 
 
 def _fetch_serper_news(sid: str, sname: str, api_key: str) -> list[dict]:
     queries = _build_queries(sid, sname)
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
 
-    best_fallback: list[dict[str, Any]] = []
+    all_fetched: list[dict[str, Any]] = []
+    all_relevant: list[dict[str, Any]] = []
+
     for query in queries:
         payload = {"q": query, "num": 10, "gl": "tw", "hl": "zh-tw", "tbs": "qdr:y"}
         resp = requests.post("https://google.serper.dev/news", headers=headers, json=payload, timeout=20)
         resp.raise_for_status()
         data = resp.json() if resp.content else {}
         fetched = data.get("news", []) if isinstance(data, dict) else []
-        if fetched and not best_fallback:
-            best_fallback = fetched
+        all_fetched.extend(fetched)
 
         relevant = [n for n in fetched if _is_relevant_news(n, sid, sname)]
-        if relevant:
-            best_fallback = relevant
+        all_relevant.extend(relevant)
+
+    relevant_sorted = sorted(_dedupe_news(all_relevant, default_source="SERPER"), key=_news_sort_key, reverse=True)
+    fetched_sorted = sorted(_dedupe_news(all_fetched, default_source="SERPER"), key=_news_sort_key, reverse=True)
+
+    if len(relevant_sorted) >= 10:
+        return relevant_sorted[:10]
+
+    used = {str(item.get("url", "")).strip().lower() or str(item.get("title", "")).strip().lower() for item in relevant_sorted}
+    filled = list(relevant_sorted)
+    for item in fetched_sorted:
+        key = str(item.get("url", "")).strip().lower() or str(item.get("title", "")).strip().lower()
+        if key in used:
+            continue
+        used.add(key)
+        filled.append(item)
+        if len(filled) >= 10:
             break
 
-    normalized = [
-        {
-            "title": item.get("title", ""),
-            "body": item.get("snippet", "") or item.get("body", ""),
-            "url": item.get("link", "") or item.get("url", ""),
-            "source": item.get("source", "SERPER"),
-            "date": item.get("date", ""),
-        }
-        for item in best_fallback
-    ]
-
-    return sorted(normalized, key=_news_sort_key, reverse=True)[:10]
+    return filled[:10]
 
 
 def _render_news_list(news_list: list[dict], source_label: str):
