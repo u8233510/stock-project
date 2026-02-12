@@ -6,6 +6,34 @@ from ddgs import DDGS
 import database
 
 
+def _search_news(ddgs: DDGS, query: str, timelimit: str) -> list[dict]:
+    """相容不同 ddgs 版本的 news 參數命名。"""
+    common_kwargs = {
+        "region": "wt-wt",
+        "safesearch": "off",
+        "timelimit": timelimit,
+        "max_results": 10,
+    }
+
+    attempts = [
+        lambda: ddgs.news(query=query, **common_kwargs),
+        lambda: ddgs.news(query, **common_kwargs),
+        lambda: ddgs.news(keywords=query, **common_kwargs),
+    ]
+
+    last_exc = None
+    for attempt in attempts:
+        try:
+            return list(attempt())
+        except TypeError as exc:
+            last_exc = exc
+            continue
+
+    if last_exc is not None:
+        raise last_exc
+    return []
+
+
 def render_stock_news(sid: str, sname: str):
     """
     主要渲染函數：搜尋並顯示指定股票的最新 10 則新聞
@@ -30,14 +58,7 @@ def render_stock_news(sid: str, sname: str):
             # 2. 使用 DuckDuckGo 進行新聞搜尋（逐步放寬條件）
             with DDGS() as ddgs:
                 for query in queries:
-                    results = ddgs.news(
-                        query,
-                        region="wt-wt",
-                        safesearch="off",
-                        timelimit=timelimit,
-                        max_results=10,
-                    )
-                    fetched = list(results)
+                    fetched = _search_news(ddgs, query, timelimit)
                     if fetched:
                         news_list = fetched
                         break
