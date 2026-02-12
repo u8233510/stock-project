@@ -1,44 +1,56 @@
 from datetime import datetime
 
 import streamlit as st
-from duckduckgo_search import DDGS
-from datetime import datetime
+try:
+    from ddgs import DDGS
+except Exception:
+    from duckduckgo_search import DDGS
 
 import database
 
 
 def render_stock_news(sid: str, sname: str):
     """
-    主要渲染函數：搜尋並顯示指定股票的最新 5 則新聞
+    主要渲染函數：搜尋並顯示指定股票的最新 10 則新聞
     :param sid: 股票代碼 (例如: 2330)
     :param sname: 股票名稱 (例如: 台積電)
     """
     st.subheader(f"🌐 {sname} ({sid}) 最新相關新聞")
 
-    # 1. 建立搜尋關鍵字
-    search_query = f"{sname} {sid} 股票 新聞"
+    # 1. 建立搜尋關鍵字（多組 fallback，避免單一 query 無資料）
+    queries = [
+        f"{sname} {sid} 股票 新聞",
+        f"{sname} 股票 新聞",
+        f"{sid} 股票 新聞",
+    ]
+
+    # timelimit 直接使用「年」
+    timelimit = "y"
 
     try:
         with st.spinner("正在從網路搜尋最新動態..."):
-            # 2. 使用 DuckDuckGo 進行新聞搜尋
+            news_list = []
+            # 2. 使用 DuckDuckGo 進行新聞搜尋（逐步放寬條件）
             with DDGS() as ddgs:
-                # news() 函數會回傳最新新聞資訊
-                results = ddgs.news(
-                    keywords=search_query,
-                    region="wt-wt",  # 全球範圍
-                    safesearch="off",
-                    timelimit="d",  # 限制在最近一天內的資訊 (可改為 'w' 週)
-                    max_results=5,  # 只取 5 則
-                )
-
-                news_list = list(results)
+                for query in queries:
+                    results = ddgs.news(
+                        keywords=query,
+                        region="wt-wt",
+                        safesearch="off",
+                        timelimit=timelimit,
+                        max_results=10,
+                    )
+                    fetched = list(results)
+                    if fetched:
+                        news_list = fetched
+                        break
 
         # 3. 呈現搜尋結果
         if not news_list:
-            st.warning("目前找不到相關的即時新聞，請稍後再試。")
+            st.warning("目前找不到相關新聞（已嘗試代碼/名稱、近一年範圍），請稍後再試。")
             return
 
-        for news in news_list:
+        for news in news_list[:10]:
             # 建立一個美觀的容器顯示每一則新聞
             with st.container():
                 col1, col2 = st.columns([1, 4])
