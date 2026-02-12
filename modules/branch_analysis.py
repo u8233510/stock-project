@@ -7,13 +7,14 @@ import requests
 import plotly.graph_objects as go
 from weighted_cost_utils import compute_interval_metrics
 from branch_weighted_cost_helpers import format_snapshot_caption
+from modules.llm_model_selector import get_llm_model
 
 
 def _call_nim(cfg, messages, temperature=0.0, max_tokens=2000):
     llm_cfg = cfg.get("llm", {})
     url = "https://integrate.api.nvidia.com/v1/chat/completions"
     headers = {"Authorization": f"Bearer {llm_cfg.get('api_key')}", "Content-Type": "application/json"}
-    payload = {"model": llm_cfg.get("model"), "messages": messages, "temperature": 0.0, "max_tokens": max_tokens}
+    payload = {"model": get_llm_model(cfg, "branch"), "messages": messages, "temperature": 0.0, "max_tokens": max_tokens}
     resp = requests.post(url, headers=headers, json=payload, timeout=120)
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"]

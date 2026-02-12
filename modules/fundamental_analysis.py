@@ -5,6 +5,7 @@ import requests
 from duckduckgo_search import DDGS
 from urllib.parse import quote_plus
 import xml.etree.ElementTree as ET
+from modules.llm_model_selector import get_llm_model
 
 
 TRUSTED_SOURCE_PATTERNS = {
@@ -670,7 +671,7 @@ def _build_fundamental_prompt(stock_name, sid, search_ctx, metrics):
 def _call_nim_fundamental(cfg, prompt):
     llm_cfg = cfg.get("llm", {})
     api_key = _normalize_secret(llm_cfg.get("api_key"))
-    model_name = llm_cfg.get("model") or "meta/llama-3.1-70b-instruct"
+    model_name = get_llm_model(cfg, "fundamental", "meta/llama-3.1-70b-instruct")
     if not api_key:
         raise ValueError("llm.api_key 未設定。")
 
@@ -794,7 +795,7 @@ def show_fundamental_analysis():
         )
         model_name = st.text_input(
             "LLM 模型（NVIDIA NIM）",
-            value=llm_cfg.get("model") or "meta/llama-3.1-70b-instruct",
+            value=get_llm_model(cfg, "fundamental", "meta/llama-3.1-70b-instruct"),
             disabled=not use_llm,
         )
 
@@ -804,7 +805,7 @@ def show_fundamental_analysis():
         if llm_available:
             st.success(f"✅ 已偵測到 llm.api_key（{_mask_secret(llm_cfg.get('api_key'))}），可直接使用 {model_name} 進行強化分析。")
         st.info("💡 改善建議：系統會先做多查詢聯網蒐集，再交給 LLM 整合；效果會比只靠模型記憶好。")
-        st.caption("已停用 Google Custom Search JSON API。建議在 config 設定 search.provider='openrouter_then_rss' 並填入 openrouter_api_key。")
+        st.caption("此頁支援純 NVIDIA LLM 分析；若未設定 llm.api_key，系統會自動使用免費規則化報告。")
 
         run_btn_label = "🚀 啟動 AI 基本面分析（LLM 強化）" if use_llm else "🚀 啟動 AI 基本面分析（免費規則化）"
         # ✅ 保留聯網搜尋邏輯
@@ -846,7 +847,7 @@ def show_fundamental_analysis():
                 }
 
                 if use_llm and llm_available:
-                    cfg.setdefault("llm", {})["model"] = model_name
+                    cfg.setdefault("llm", {}).setdefault("models", {})["fundamental"] = model_name
                     prompt = _build_fundamental_prompt(selected_stock, sid, search_ctx, metrics)
                     try:
                         ai_report = _call_nim_fundamental(cfg, prompt)
