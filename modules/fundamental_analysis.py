@@ -3,6 +3,34 @@ import pandas as pd
 import database
 import requests
 from duckduckgo_search import DDGS
+from urllib.parse import quote_plus
+import xml.etree.ElementTree as ET
+
+
+TRUSTED_SOURCE_PATTERNS = {
+    "A": [
+        "mops.twse.com.tw",
+        "twse.com.tw",
+        "tpex.org.tw",
+        "sec.gov",
+        "investor",
+        "ir.",
+    ],
+    "B": [
+        "reuters.com",
+        "bloomberg.com",
+        "cnbc.com",
+        "wsj.com",
+        "moneydj.com",
+        "cnyes.com",
+        "udn.com",
+    ],
+}
+
+TW_US_ADR_MAPPING = {
+    "2330": "TSM",  # 台積電
+    "2303": "UMC",  # 聯電
+}
 
 
 
@@ -80,13 +108,107 @@ runPuterDemo();
 """
 
 
+def _get_google_quota_state():
+    """在 Streamlit session 內追蹤每日 Google CSE 呼叫數（不使用 Search Console）。"""
+    state = st.session_state.setdefault("google_cse_quota", {"day": "", "count": 0})
+    today = pd.Timestamp.now(tz="Asia/Taipei").strftime("%Y-%m-%d")
+    if state.get("day") != today:
+        state["day"] = today
+        state["count"] = 0
+    return state
+
+
+def _google_cache_get(query, max_age_minutes=120):
+    cache = st.session_state.setdefault("google_cse_cache", {})
+    item = cache.get(query)
+    if not item:
+        return None
+    now_ts = pd.Timestamp.utcnow().timestamp()
+    if now_ts - item.get("ts", 0) > max_age_minutes * 60:
+        return None
+    return item.get("records", [])
+
+
+def _google_cache_set(query, records):
+    cache = st.session_state.setdefault("google_cse_cache", {})
+    cache[query] = {"ts": pd.Timestamp.utcnow().timestamp(), "records": records}
+
+
+def _google_news_rss_search(query, max_results=4):
+    """免費補強來源：Google News RSS（不需付費，不用 Search Console）。"""
+    try:
+        rss_url = f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+        resp = requests.get(rss_url, timeout=20)
+        if resp.status_code >= 400:
+            return [], f"Google News RSS 失敗：HTTP {resp.status_code}"
+
+        root = ET.fromstring(resp.text)
+        items = root.findall('.//item')
+        records = []
+        for item in items[:max_results]:
+            link = (item.findtext('link') or '').strip()
+            records.append(
+                {
+                    "source": "GoogleNewsRSS",
+                    "title": (item.findtext('title') or '').strip(),
+                    "snippet": (item.findtext('description') or '').strip(),
+                    "url": link,
+                    "tier": _classify_source_tier(link),
+                }
+            )
+
+        if not records:
+            return [], "Google News RSS 查詢無結果。"
+        return records, None
+    except Exception as exc:
+        return [], f"Google News RSS 例外：{str(exc)}"
+
+
+def _wikipedia_summary_search(stock_name, sid):
+    """免費補強來源：Wikipedia 摘要（公司簡介/產業線索）。"""
+    candidates = [
+        f"{stock_name}",
+        f"{stock_name} {sid}",
+    ]
+    for q in candidates:
+        try:
+            url = "https://zh.wikipedia.org/api/rest_v1/page/summary/" + quote_plus(q)
+            resp = requests.get(url, timeout=20)
+            if resp.status_code >= 400:
+                continue
+            data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+            title = data.get("title", "") if isinstance(data, dict) else ""
+            extract = data.get("extract", "") if isinstance(data, dict) else ""
+            page = data.get("content_urls", {}).get("desktop", {}).get("page", "") if isinstance(data, dict) else ""
+            if title and extract:
+                return [{
+                    "source": "Wikipedia",
+                    "title": title,
+                    "snippet": extract,
+                    "url": page,
+                    "tier": "B",
+                }], None
+        except Exception:
+            continue
+    return [], "Wikipedia 摘要無結果。"
+
+
 def _google_search(query, cfg, max_results=5):
-    """透過 Google Custom Search 取得搜尋摘要。"""
+    """透過 Google Custom Search 取得搜尋摘要（僅用 JSON API，不用標準搜尋元素/Search Console）。"""
     search_cfg = cfg.get("search", {})
     api_key = _normalize_secret(search_cfg.get("google_api_key"))
     cse_id = _normalize_secret(search_cfg.get("google_cse_id"))
     if not api_key or not cse_id:
         return [], "Google 未設定 google_api_key 或 google_cse_id。"
+
+    cached = _google_cache_get(query)
+    if cached is not None:
+        return cached, None
+
+    quota_state = _get_google_quota_state()
+    daily_free_limit = int(search_cfg.get("google_daily_free_limit", 100) or 100)
+    if quota_state.get("count", 0) >= daily_free_limit:
+        return [], f"Google 免費額度保護：今日已達 {daily_free_limit} 次上限，改用 RSS/Wikipedia 補強。"
 
     try:
         resp = requests.get(
@@ -100,6 +222,7 @@ def _google_search(query, cfg, max_results=5):
             },
             timeout=20,
         )
+        quota_state["count"] = quota_state.get("count", 0) + 1
         data = resp.json()
         if resp.status_code >= 400:
             err_msg = data.get("error", {}).get("message", f"HTTP {resp.status_code}") if isinstance(data, dict) else f"HTTP {resp.status_code}"
@@ -113,11 +236,13 @@ def _google_search(query, cfg, max_results=5):
                 "title": i.get("title", ""),
                 "snippet": i.get("snippet", ""),
                 "url": i.get("link", ""),
+                "tier": _classify_source_tier(i.get("link", "")),
             }
             for i in items
         ]
         if not records:
             return [], "Google 已連線，但此查詢無結果。"
+        _google_cache_set(query, records)
         return records, None
     except Exception as exc:
         return [], f"Google 搜尋例外：{str(exc)}"
@@ -167,6 +292,97 @@ def _perplexity_search(query, cfg):
         return [], f"Perplexity 搜尋例外：{str(exc)}"
 
 
+
+def _puter_search(query, cfg):
+    """透過 Puter API 取得外部資訊摘要（可選 provider，預設不啟用）。"""
+    search_cfg = cfg.get("search", {})
+    api_key = _normalize_secret(search_cfg.get("puter_api_key"))
+    model = search_cfg.get("puter_model", "perplexity/sonar")
+    if not api_key:
+        return [], "Puter 未設定 puter_api_key。"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "你是研究助理，請根據公開網路資訊整理重點並附來源網址。"},
+            {"role": "user", "content": f"請針對以下主題整理 5 點重點，每點需附來源網址：{query}"},
+        ],
+        "temperature": 0.1,
+    }
+
+    # 注意：Puter 官方介面可能調整，故此 provider 預設為可選。
+    try:
+        resp = requests.post(
+            "https://api.puter.com/v2/ai/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        data = resp.json() if resp.content else {}
+        if resp.status_code >= 400:
+            err_msg = data.get("error", {}).get("message", f"HTTP {resp.status_code}") if isinstance(data, dict) else f"HTTP {resp.status_code}"
+            return [], f"Puter 搜尋失敗：{err_msg}"
+
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "") if isinstance(data, dict) else ""
+        if not content:
+            return [], "Puter 已連線，但無回傳內容。"
+        return [{"source": "Puter", "title": "摘要", "snippet": content, "url": "", "tier": "B"}], None
+    except Exception as exc:
+        return [], f"Puter 搜尋例外：{str(exc)}"
+
+
+def _openrouter_search(query, cfg):
+    """透過 OpenRouter 取得外部資訊摘要（可使用你的 OpenRouter Key）。"""
+    search_cfg = cfg.get("search", {})
+    api_key = _normalize_secret(search_cfg.get("openrouter_api_key"))
+    model = search_cfg.get("openrouter_model", "perplexity/sonar")
+    if not api_key:
+        return [], "OpenRouter 未設定 openrouter_api_key。"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": search_cfg.get("openrouter_site_url", "https://localhost"),
+        "X-Title": search_cfg.get("openrouter_app_name", "stock-project"),
+    }
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "你是研究助理，請根據公開網路資訊整理重點，附上來源網址，禁止虛構。",
+            },
+            {
+                "role": "user",
+                "content": f"請針對以下主題整理 5 點重點，每點需附可點擊網址：{query}",
+            },
+        ],
+        "temperature": 0.1,
+    }
+
+    try:
+        resp = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        data = resp.json()
+        if resp.status_code >= 400:
+            err_msg = data.get("error", {}).get("message", f"HTTP {resp.status_code}") if isinstance(data, dict) else f"HTTP {resp.status_code}"
+            return [], f"OpenRouter 搜尋失敗：{err_msg}"
+
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "") if isinstance(data, dict) else ""
+        if not content:
+            return [], "OpenRouter 已連線，但無回傳內容。"
+        return [{"source": "OpenRouter", "title": "摘要", "snippet": content, "url": "", "tier": "B"}], None
+    except Exception as exc:
+        return [], f"OpenRouter 搜尋例外：{str(exc)}"
+
 def _ddg_search(query, max_results=5, source="DuckDuckGo"):
     try:
         with DDGS() as ddgs:
@@ -178,6 +394,7 @@ def _ddg_search(query, max_results=5, source="DuckDuckGo"):
                         "title": r.get("title", ""),
                         "snippet": r.get("body", ""),
                         "url": r.get("href", ""),
+                        "tier": _classify_source_tier(r.get("href", "")),
                     }
                 )
             if not results:
@@ -185,6 +402,38 @@ def _ddg_search(query, max_results=5, source="DuckDuckGo"):
             return results, None
     except Exception as exc:
         return [], f"{source} 搜尋例外：{str(exc)}"
+
+
+def _classify_source_tier(url):
+    """將來源分級：A(官方/監管)、B(主流媒體)、C(其他)。"""
+    url_text = (url or "").lower()
+    if not url_text:
+        return "C"
+
+    for tier, patterns in TRUSTED_SOURCE_PATTERNS.items():
+        if any(p in url_text for p in patterns):
+            return tier
+    return "C"
+
+
+def _resolve_us_mapping(stock_id, stock_name):
+    """Layer B 起點：先做高可信白名單對應，再保留後續擴充空間。"""
+    sid = str(stock_id).strip()
+    ticker = TW_US_ADR_MAPPING.get(sid)
+    if ticker:
+        return {
+            "ticker": ticker,
+            "mapping_type": "direct_adr",
+            "confidence": 0.98,
+            "evidence": ["manual_mapping_table"],
+        }
+
+    return {
+        "ticker": "",
+        "mapping_type": "none",
+        "confidence": 0.0,
+        "evidence": [f"no_mapping_for_{stock_name}_{sid}"],
+    }
 
 
 def _build_search_queries(stock_name, sid):
@@ -213,16 +462,21 @@ def _dedup_records(records):
 def _build_external_context(stock_name, sid, cfg):
     """蒐集外部資訊（可配置付費/免費來源 + 社群網站搜尋）。"""
     search_cfg = cfg.get("search", {})
-    preferred_provider = str(search_cfg.get("provider", "ddg")).lower().strip()
+    preferred_provider = str(search_cfg.get("provider", "google_then_rss")).lower().strip()
 
     records = []
     warnings = []
     topic_queries = _build_search_queries(stock_name, sid)
 
+    google_queries_used = 0
+    google_query_budget = int(search_cfg.get("google_queries_per_run", 2) or 2)
+    use_ddg = str(search_cfg.get("enable_ddg", "false")).lower() == "true"
+
     for query, tag in topic_queries:
-        if preferred_provider == "google":
+        if preferred_provider in {"google", "google_then_rss", "google_then_ddg"} and google_queries_used < google_query_budget:
             google_records, google_warn = _google_search(query, cfg, max_results=3)
             records.extend(google_records)
+            google_queries_used += 1
             if google_warn:
                 warnings.append(f"[{tag}] {google_warn}")
         elif preferred_provider == "perplexity":
@@ -230,23 +484,45 @@ def _build_external_context(stock_name, sid, cfg):
             records.extend(pplx_records)
             if pplx_warn:
                 warnings.append(f"[{tag}] {pplx_warn}")
+        elif preferred_provider == "openrouter":
+            or_records, or_warn = _openrouter_search(query, cfg)
+            records.extend(or_records)
+            if or_warn:
+                warnings.append(f"[{tag}] {or_warn}")
+        elif preferred_provider == "puter":
+            put_records, put_warn = _puter_search(query, cfg)
+            records.extend(put_records)
+            if put_warn:
+                warnings.append(f"[{tag}] {put_warn}")
 
-        ddg_records, ddg_warn = _ddg_search(query, max_results=3, source=f"DuckDuckGo/{tag}")
-        records.extend(ddg_records)
-        if ddg_warn:
-            warnings.append(f"[{tag}] {ddg_warn}")
+        rss_records, rss_warn = _google_news_rss_search(query, max_results=2)
+        records.extend(rss_records)
+        if rss_warn:
+            warnings.append(f"[{tag}] {rss_warn}")
 
-    # 社群/輿情（以公開可索引頁面為主，非登入資料）
-    social_queries = [
-        (f"site:x.com OR site:twitter.com {stock_name} {sid}", "X/Twitter"),
-        (f"site:facebook.com {stock_name} {sid}", "Facebook"),
-        (f"site:instagram.com {stock_name} {sid}", "Instagram"),
-    ]
-    for query, source in social_queries:
-        social_records, social_warn = _ddg_search(query, max_results=2, source=source)
-        records.extend(social_records)
-        if social_warn:
-            warnings.append(social_warn)
+        if use_ddg or preferred_provider == "google_then_ddg":
+            ddg_records, ddg_warn = _ddg_search(query, max_results=2, source=f"DuckDuckGo/{tag}")
+            records.extend(ddg_records)
+            if ddg_warn:
+                warnings.append(f"[{tag}] {ddg_warn}")
+
+    wiki_records, wiki_warn = _wikipedia_summary_search(stock_name, sid)
+    records.extend(wiki_records)
+    if wiki_warn:
+        warnings.append(wiki_warn)
+
+    # 社群/輿情（可選，避免 DDG 品質差時引入噪音）
+    if use_ddg:
+        social_queries = [
+            (f"site:x.com OR site:twitter.com {stock_name} {sid}", "X/Twitter"),
+            (f"site:facebook.com {stock_name} {sid}", "Facebook"),
+            (f"site:instagram.com {stock_name} {sid}", "Instagram"),
+        ]
+        for query, source in social_queries:
+            social_records, social_warn = _ddg_search(query, max_results=2, source=source)
+            records.extend(social_records)
+            if social_warn:
+                warnings.append(social_warn)
 
     records = _dedup_records(records)
     if not records:
@@ -254,17 +530,30 @@ def _build_external_context(stock_name, sid, cfg):
         return "", warnings
 
     source_counts = {}
+    tier_counts = {"A": 0, "B": 0, "C": 0}
     for rec in records:
         src = rec.get("source", "來源")
         source_counts[src] = source_counts.get(src, 0) + 1
+        tier = rec.get("tier", "C")
+        tier_counts[tier] = tier_counts.get(tier, 0) + 1
     summary = "、".join([f"{k}:{v}" for k, v in source_counts.items()])
-    warnings.insert(0, f"外部來源抓取成功（{summary}）。")
+    tier_summary = "、".join([f"{k}:{v}" for k, v in tier_counts.items() if v > 0])
+    warnings.insert(0, f"外部來源抓取成功（{summary}；來源分級 {tier_summary}）。Google 僅使用 Custom Search JSON API，並以 Google News RSS/Wikipedia 補強。")
+
+    mapping_info = _resolve_us_mapping(sid, stock_name)
+    if mapping_info["mapping_type"] == "direct_adr":
+        warnings.insert(1, f"美股對應：{sid} → {mapping_info['ticker']}（direct_adr, confidence={mapping_info['confidence']:.2f}）")
+    else:
+        warnings.insert(1, f"美股對應：目前無白名單 ADR 對應（{sid}），後續可由外部結構化來源補強。")
 
     lines = []
     for rec in records[:24]:
         url = rec.get("url", "")
         url_text = f"（{url}）" if url else ""
-        lines.append(f"- [{rec.get('source', '來源')}] {rec.get('title', '')}: {rec.get('snippet', '')} {url_text}")
+        lines.append(
+            f"- [{rec.get('source', '來源')}/Tier-{rec.get('tier', 'C')}] "
+            f"{rec.get('title', '')}: {rec.get('snippet', '')} {url_text}"
+        )
     return "\n".join(lines), warnings
 
 
@@ -608,6 +897,7 @@ def show_fundamental_analysis():
         if llm_available:
             st.success(f"✅ 已偵測到 llm.api_key（{_mask_secret(llm_cfg.get('api_key'))}），可直接使用 {model_name} 進行強化分析。")
         st.info("💡 改善建議：系統會先做多查詢聯網蒐集，再交給 LLM 整合；效果會比只靠模型記憶好。")
+        st.caption("若你有 OpenRouter/Puter key，可在 config search.provider 設為 'openrouter' 或 'puter'，並設定對應 api_key。")
 
         run_btn_label = "🚀 啟動 AI 基本面分析（LLM 強化）" if use_llm else "🚀 啟動 AI 基本面分析（免費規則化）"
         # ✅ 保留聯網搜尋邏輯
