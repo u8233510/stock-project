@@ -1,1223 +1,468 @@
-import streamlit as st
-import pandas as pd
-import database
-import requests
-import math
-import csv
-import io
 import re
+from typing import Any, Dict, List, Tuple
+
+import pandas as pd
+import requests
+import streamlit as st
 from duckduckgo_search import DDGS
-from urllib.parse import quote_plus
-import xml.etree.ElementTree as ET
+
+import database
 from modules.llm_model_selector import get_llm_model
 
 
-TRUSTED_SOURCE_PATTERNS = {
-    "A": [
-        "mops.twse.com.tw",
-        "twse.com.tw",
-        "tpex.org.tw",
-        "sec.gov",
-        "investor",
-        "ir.",
-    ],
-    "B": [
-        "reuters.com",
-        "bloomberg.com",
-        "cnbc.com",
-        "wsj.com",
-        "moneydj.com",
-        "cnyes.com",
-        "udn.com",
-    ],
-}
-
-TW_US_ADR_MAPPING = {
-    "2330": "TSM",  # 台積電
-    "2303": "UMC",  # 聯電
-    "2233": "2233.TW",  # 宇隆（先用台股代碼）
-}
-
-INDUSTRY_PROXY_KEYWORDS = {
-    "default": ["半導體", "電子零組件", "工業製造"],
-}
-
-
-def _normalize_secret(value):
-    """去除常見貼上污染（空白/換行/BOM）。"""
+def _normalize_secret(value: Any) -> str:
     if value is None:
         return ""
-    return str(value).replace("﻿", "").strip()
+    return str(value).replace("\ufeff", "").strip()
 
 
-def _mask_secret(value, keep=4):
-    """遮罩敏感資訊，避免完整金鑰外露。"""
-    val = _normalize_secret(value)
-    if not val:
-        return "(未設定)"
-    if len(val) <= keep:
-        return "*" * len(val)
-    return f"{'*' * (len(val) - keep)}{val[-keep:]}"
-
-
-PUTER_JS_SNIPPET = """<script src="https://js.puter.com/v2/"></script>
-<script>
-async function runPuterDemo() {
-  try {
-    const response = await puter.ai.chat(
-      "量子運算的最新進展是什麼？",
-      { model: "perplexity/sonar" }
-    );
-    console.log(response);
-  } catch (err) {
-    console.error("Puter 呼叫失敗:", err);
-  }
-}
-runPuterDemo();
-</script>
-"""
-
-
-def _external_cache_get(query, max_age_minutes=120):
-    cache = st.session_state.setdefault("external_search_cache", {})
-    item = cache.get(query)
-    if not item:
+def _to_float(value: Any) -> float | None:
+    if value is None:
         return None
-    now_ts = pd.Timestamp.utcnow().timestamp()
-    if now_ts - item.get("ts", 0) > max_age_minutes * 60:
+    if isinstance(value, (int, float)):
+        return float(value)
+    txt = str(value).replace(",", "").replace("%", "").strip()
+    if txt in {"", "N/A", "None", "nan", "--"}:
         return None
-    return item.get("records", [])
-
-
-def _external_cache_set(query, records):
-    cache = st.session_state.setdefault("external_search_cache", {})
-    cache[query] = {"ts": pd.Timestamp.utcnow().timestamp(), "records": records}
-
-
-def _google_news_rss_search(query, max_results=4):
-    """免費補強來源：Google News RSS（不需付費，不用 Search Console）。"""
     try:
-        base_query = str(query or "").strip()
-        if not base_query:
-            return [], "Google News RSS 查詢無結果。"
+        return float(txt)
+    except Exception:
+        return None
 
-        token_blacklist = {
-            "同產業", "台股", "近況", "訂單", "台灣", "產業新聞", "景氣", "循環", "美股", "指數", "財報", "展望",
-            "earnings", "guidance", "margin", "demand",
-        }
-        cleaned_tokens = [
-            tok for tok in base_query.split()
-            if tok and tok not in token_blacklist and not tok.isdigit()
-        ]
 
-        query_candidates = [base_query]
-        if cleaned_tokens:
-            query_candidates.append(" ".join(cleaned_tokens[:3]))
-            query_candidates.append(cleaned_tokens[0])
+def _safe_read_sql(conn, sql: str, params: Tuple | None = None) -> pd.DataFrame:
+    try:
+        return pd.read_sql(sql, conn, params=params)
+    except Exception:
+        return pd.DataFrame()
 
-        seen = set()
-        dedup_queries = []
-        for q in query_candidates:
-            qq = q.strip()
-            if qq and qq not in seen:
-                seen.add(qq)
-                dedup_queries.append(qq)
 
-        locale_candidates = [
-            ("zh-TW", "TW", "TW:zh-Hant"),
-            ("zh-CN", "CN", "CN:zh-Hans"),
-            ("en", "US", "US:en"),
-        ]
+def _mask_secret(value: Any, keep: int = 4) -> str:
+    raw = _normalize_secret(value)
+    if not raw:
+        return "(未設定)"
+    if len(raw) <= keep:
+        return "*" * len(raw)
+    return f"{'*' * (len(raw) - keep)}{raw[-keep:]}"
 
-        for q in dedup_queries:
-            for hl, gl, ceid in locale_candidates:
-                rss_url = f"https://news.google.com/rss/search?q={quote_plus(q)}&hl={hl}&gl={gl}&ceid={ceid}"
-                resp = requests.get(
-                    rss_url,
-                    timeout=20,
-                    headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8"},
+
+def _call_nim(cfg: Dict[str, Any], task: str, system_prompt: str, user_prompt: str) -> str:
+    llm_cfg = cfg.get("llm", {})
+    api_key = _normalize_secret(llm_cfg.get("api_key"))
+    if not api_key:
+        raise ValueError("llm.api_key 未設定")
+
+    model = get_llm_model(cfg, task, "meta/llama-3.1-70b-instruct")
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.1,
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    resp = requests.post("https://integrate.api.nvidia.com/v1/chat/completions", json=payload, headers=headers, timeout=90)
+    data = resp.json() if resp.content else {}
+    if resp.status_code >= 400:
+        msg = data.get("error", {}).get("message", f"HTTP {resp.status_code}") if isinstance(data, dict) else f"HTTP {resp.status_code}"
+        raise RuntimeError(msg)
+
+    text = data.get("choices", [{}])[0].get("message", {}).get("content", "") if isinstance(data, dict) else ""
+    if not text:
+        raise RuntimeError("LLM 未回傳內容")
+    return text
+
+
+def _ddg_search(query: str, limit: int = 5) -> List[Dict[str, str]]:
+    try:
+        out: List[Dict[str, str]] = []
+        with DDGS() as ddgs:
+            for item in ddgs.text(query, max_results=limit):
+                out.append(
+                    {
+                        "title": item.get("title", ""),
+                        "snippet": item.get("body", ""),
+                        "url": item.get("href", ""),
+                        "source": "DuckDuckGo",
+                    }
                 )
-                if resp.status_code >= 400:
-                    continue
-
-                root = ET.fromstring(resp.text)
-                items = root.findall('.//item')
-                records = []
-                for item in items[:max_results]:
-                    link = (item.findtext('link') or '').strip()
-                    records.append(
-                        {
-                            "source": "GoogleNewsRSS",
-                            "title": (item.findtext('title') or '').strip(),
-                            "snippet": (item.findtext('description') or '').strip(),
-                            "url": link,
-                            "tier": _classify_source_tier(link),
-                        }
-                    )
-                if records:
-                    return records, None
-
-        return [], f"Google News RSS 查詢無結果（原始查詢：{base_query}）。"
-    except Exception as exc:
-        return [], f"Google News RSS 例外：{str(exc)}"
+        return out
+    except Exception:
+        return []
 
 
-def _wikipedia_summary_search(stock_name, sid):
-    """免費補強來源：Wikipedia 摘要（公司簡介/產業線索）。"""
-    candidates = [
-        f"{stock_name}",
-        f"{stock_name} {sid}",
-    ]
-    for q in candidates:
-        try:
-            url = "https://zh.wikipedia.org/api/rest_v1/page/summary/" + quote_plus(q)
-            resp = requests.get(url, timeout=20)
-            if resp.status_code >= 400:
-                continue
-            data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
-            title = data.get("title", "") if isinstance(data, dict) else ""
-            extract = data.get("extract", "") if isinstance(data, dict) else ""
-            page = data.get("content_urls", {}).get("desktop", {}).get("page", "") if isinstance(data, dict) else ""
-            if title and extract:
-                return [{
-                    "source": "Wikipedia",
-                    "title": title,
-                    "snippet": extract,
-                    "url": page,
-                    "tier": "B",
-                }], None
-        except Exception:
-            continue
-    return [], "Wikipedia 摘要無結果。"
-
-
-def _perplexity_search(query, cfg):
-    """透過 Perplexity API 取得外部資訊摘要。"""
+def _perplexity_search(cfg: Dict[str, Any], query: str) -> List[Dict[str, str]]:
     search_cfg = cfg.get("search", {})
     api_key = _normalize_secret(search_cfg.get("perplexity_api_key"))
     model = search_cfg.get("perplexity_model", "sonar")
     if not api_key:
-        return [], "Perplexity 未設定 perplexity_api_key。"
+        return []
 
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
         "model": model,
         "messages": [
-            {
-                "role": "system",
-                "content": "你是研究助理，請根據最新網路公開資訊整理重點，並附上來源網址。",
-            },
-            {
-                "role": "user",
-                "content": f"請針對以下主題整理 5 點重點，格式為一行一點，且每點附來源網址：{query}",
-            },
+            {"role": "system", "content": "你是研究助理，回覆重點並盡量附上來源。"},
+            {"role": "user", "content": f"整理以下主題的最新重點，列點輸出：{query}"},
         ],
         "temperature": 0.0,
     }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
     try:
-        resp = requests.post(
-            "https://api.perplexity.ai/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=30,
-        )
-        data = resp.json()
-        if resp.status_code >= 400:
-            err_msg = data.get("error", {}).get("message", f"HTTP {resp.status_code}") if isinstance(data, dict) else f"HTTP {resp.status_code}"
-            return [], f"Perplexity 搜尋失敗：{err_msg}"
-
-        content = data.get("choices", [{}])[0].get("message", {}).get("content", "") if isinstance(data, dict) else ""
-        if not content:
-            return [], "Perplexity 已連線，但無回傳內容。"
-        return [{"source": "Perplexity", "title": "摘要", "snippet": content, "url": ""}], None
-    except Exception as exc:
-        return [], f"Perplexity 搜尋例外：{str(exc)}"
-
-
-
-def _puter_search(query, cfg):
-    """透過 Puter API 取得外部資訊摘要（可選 provider，預設不啟用）。"""
-    search_cfg = cfg.get("search", {})
-    api_key = _normalize_secret(search_cfg.get("puter_api_key"))
-    model = search_cfg.get("puter_model", "perplexity/sonar")
-    if not api_key:
-        return [], "Puter 未設定 puter_api_key。"
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": "你是研究助理，請根據公開網路資訊整理重點並附來源網址。"},
-            {"role": "user", "content": f"請針對以下主題整理 5 點重點，每點需附來源網址：{query}"},
-        ],
-        "temperature": 0.1,
-    }
-
-    # 注意：Puter 官方介面可能調整，故此 provider 預設為可選。
-    try:
-        resp = requests.post(
-            "https://api.puter.com/v2/ai/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=30,
-        )
+        resp = requests.post("https://api.perplexity.ai/chat/completions", json=payload, headers=headers, timeout=45)
         data = resp.json() if resp.content else {}
         if resp.status_code >= 400:
-            err_msg = data.get("error", {}).get("message", f"HTTP {resp.status_code}") if isinstance(data, dict) else f"HTTP {resp.status_code}"
-            return [], f"Puter 搜尋失敗：{err_msg}"
-
+            return []
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "") if isinstance(data, dict) else ""
         if not content:
-            return [], "Puter 已連線，但無回傳內容。"
-        return [{"source": "Puter", "title": "摘要", "snippet": content, "url": "", "tier": "B"}], None
-    except Exception as exc:
-        return [], f"Puter 搜尋例外：{str(exc)}"
-
-
-def _openrouter_search(query, cfg):
-    """透過 OpenRouter 取得外部資訊摘要（可使用你的 OpenRouter Key）。"""
-    search_cfg = cfg.get("search", {})
-    api_key = _normalize_secret(search_cfg.get("openrouter_api_key"))
-    model = search_cfg.get("openrouter_model", "perplexity/sonar")
-    if not api_key:
-        return [], "OpenRouter 未設定 openrouter_api_key。"
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": search_cfg.get("openrouter_site_url", "https://localhost"),
-        "X-Title": search_cfg.get("openrouter_app_name", "stock-project"),
-    }
-    payload = {
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": "你是研究助理，請根據公開網路資訊整理重點，附上來源網址，禁止虛構。",
-            },
-            {
-                "role": "user",
-                "content": f"請針對以下主題整理 5 點重點，每點需附可點擊網址：{query}",
-            },
-        ],
-        "temperature": 0.1,
-    }
-
-    try:
-        resp = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=30,
-        )
-        data = resp.json()
-        if resp.status_code >= 400:
-            err_msg = data.get("error", {}).get("message", f"HTTP {resp.status_code}") if isinstance(data, dict) else f"HTTP {resp.status_code}"
-            return [], f"OpenRouter 搜尋失敗：{err_msg}"
-
-        content = data.get("choices", [{}])[0].get("message", {}).get("content", "") if isinstance(data, dict) else ""
-        if not content:
-            return [], "OpenRouter 已連線，但無回傳內容。"
-        return [{"source": "OpenRouter", "title": "摘要", "snippet": content, "url": "", "tier": "B"}], None
-    except Exception as exc:
-        return [], f"OpenRouter 搜尋例外：{str(exc)}"
-
-
-def _openrouter_connectivity_check(cfg):
-    """快速檢查 OpenRouter 是否可由目前環境成功呼叫。"""
-    records, warning = _openrouter_search("台股 今日重點新聞", cfg)
-    if warning:
-        return False, warning
-    return bool(records), "OpenRouter 連線檢查成功。"
-
-def _ddg_search(query, max_results=5, source="DuckDuckGo"):
-    try:
-        with DDGS() as ddgs:
-            results = []
-            for r in ddgs.text(query, max_results=max_results):
-                results.append(
-                    {
-                        "source": source,
-                        "title": r.get("title", ""),
-                        "snippet": r.get("body", ""),
-                        "url": r.get("href", ""),
-                        "tier": _classify_source_tier(r.get("href", "")),
-                    }
-                )
-            if not results:
-                return [], f"{source} 查詢無結果。"
-            return results, None
-    except Exception as exc:
-        return [], f"{source} 搜尋例外：{str(exc)}"
-
-
-def _classify_source_tier(url):
-    """將來源分級：A(官方/監管)、B(主流媒體)、C(其他)。"""
-    url_text = (url or "").lower()
-    if not url_text:
-        return "C"
-
-    for tier, patterns in TRUSTED_SOURCE_PATTERNS.items():
-        if any(p in url_text for p in patterns):
-            return tier
-    return "C"
-
-
-def _resolve_us_mapping(stock_id, stock_name):
-    """Layer B 起點：先做高可信白名單對應，再保留後續擴充空間。"""
-    sid = str(stock_id).strip()
-    ticker = TW_US_ADR_MAPPING.get(sid)
-    if ticker:
-        return {
-            "ticker": ticker,
-            "mapping_type": "direct_adr",
-            "confidence": 0.98,
-            "evidence": ["manual_mapping_table"],
-        }
-
-    return {
-        "ticker": "",
-        "mapping_type": "none",
-        "confidence": 0.0,
-        "evidence": [f"no_mapping_for_{stock_name}_{sid}"],
-    }
-
-
-def _industry_keywords(stock_name):
-    """回傳產業代理關鍵字（先以通用詞為主，可後續擴充成資料表映射）。"""
-    _ = stock_name
-    return INDUSTRY_PROXY_KEYWORDS.get("default", [])
-
-
-def _build_macro_and_peer_queries(stock_name, sid):
-    """補充同產業、上游景氣與美股鏈結查詢。"""
-    adr = _resolve_us_mapping(sid, stock_name).get("ticker", "")
-    industry_terms = " ".join(_industry_keywords(stock_name))
-
-    queries = [
-        (f"{stock_name} {sid} 同產業 台股 近況 訂單", "同產業比較"),
-        (f"{industry_terms} 台灣 產業新聞 景氣 循環", "產業景氣"),
-        (f"美股 {industry_terms} 指數 財報 展望", "美股產業鏈"),
-    ]
-    if adr:
-        queries.append((f"{adr} earnings guidance margin demand", "對應美股/ADR"))
-    return queries
-
-
-def _row_pick_first(row, keys):
-    for k in keys:
-        if k in row and str(row.get(k)).strip() not in {"", "--", "N/A", "nan"}:
-            return row.get(k)
-    return None
-
-
-def _fetch_twse_openapi_metrics(stock_id):
-    """公開觀測站/證交所開放資料 fallback（若可用則優先）。"""
-    sid = str(stock_id).strip()
-    endpoints = [
-        "https://openapi.twse.com.tw/v1/opendata/t187ap14_L",
-        "https://openapi.twse.com.tw/v1/opendata/t187ap05_L",
-        "https://openapi.twse.com.tw/v1/opendata/t187ap04_L",
-    ]
-
-    for url in endpoints:
-        try:
-            resp = requests.get(url, timeout=20)
-            if resp.status_code >= 400:
-                continue
-            data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else []
-            if not isinstance(data, list) or not data:
-                continue
-
-            row = None
-            for r in data:
-                if str(r.get("公司代號", "")).strip() == sid or str(r.get("SecuritiesCompanyCode", "")).strip() == sid:
-                    row = r
-                    break
-            if not isinstance(row, dict):
-                continue
-
-            gross_margin = _row_pick_first(row, ["營業毛利率(%)", "毛利率(%)", "GrossMargin", "GrossMarginRate"])
-            if _to_float(gross_margin) is None:
-                gross_profit = _to_float(_row_pick_first(row, ["營業毛利（毛損）淨額", "營業毛利", "GrossProfit"]))
-                revenue = _to_float(_row_pick_first(row, ["營業收入合計", "營業收入", "Revenue"]))
-                if gross_profit is not None and revenue not in {None, 0}:
-                    gross_margin = gross_profit / revenue * 100
-
-            metrics = {
-                "latest_eps": _row_pick_first(row, ["基本每股盈餘（元）", "每股盈餘", "EPS", "BasicEarningsPerShare"]),
-                "roe": _row_pick_first(row, ["權益報酬率(%)", "ROE(%)", "ROE", "權益報酬率"]),
-                "roa": _row_pick_first(row, ["資產報酬率(%)", "ROA(%)", "ROA", "資產報酬率"]),
-                "gross_margin": gross_margin,
-                "operating_cf": _row_pick_first(row, ["營業活動之淨現金流入（流出）", "營業現金流量", "OperatingCashFlow"]),
-                "source": f"TWSE OpenAPI:{url.rsplit('/', 1)[-1]}",
-            }
-            if any(_to_float(v) is not None for k, v in metrics.items() if k != "source"):
-                return metrics, None
-        except Exception:
-            continue
-
-    return {}, "公開觀測站/證交所開放資料暫無可用欄位。"
-
-
-def _fetch_twse_csv_metrics(stock_id):
-    """CSV 版公開觀測站資料 fallback（某些環境 JSON 來源不穩定時可補位）。"""
-    sid = str(stock_id).strip()
-    endpoints = [
-        "https://mopsfin.twse.com.tw/opendata/t187ap14_L.csv",
-        "https://mopsfin.twse.com.tw/opendata/t187ap05_L.csv",
-        "https://mopsfin.twse.com.tw/opendata/t187ap04_L.csv",
-    ]
-
-    for url in endpoints:
-        try:
-            resp = requests.get(url, timeout=20)
-            if resp.status_code >= 400 or not resp.text.strip():
-                continue
-
-            rows = list(csv.DictReader(io.StringIO(resp.text)))
-            if not rows:
-                continue
-
-            row = None
-            for r in rows:
-                if str(r.get("公司代號", "")).strip() == sid:
-                    row = r
-                    break
-            if not isinstance(row, dict):
-                continue
-
-            gross_margin = _row_pick_first(row, ["營業毛利率(%)", "毛利率(%)", "營業毛利率"])
-            if _to_float(gross_margin) is None:
-                gross_profit = _to_float(_row_pick_first(row, ["營業毛利（毛損）淨額", "營業毛利"]))
-                revenue = _to_float(_row_pick_first(row, ["營業收入合計", "營業收入"]))
-                if gross_profit is not None and revenue not in {None, 0}:
-                    gross_margin = gross_profit / revenue * 100
-
-            metrics = {
-                "latest_eps": _row_pick_first(row, ["基本每股盈餘（元）", "每股盈餘", "EPS"]),
-                "roe": _row_pick_first(row, ["權益報酬率(%)", "ROE(%)", "ROE", "權益報酬率"]),
-                "roa": _row_pick_first(row, ["資產報酬率(%)", "ROA(%)", "ROA", "資產報酬率"]),
-                "gross_margin": gross_margin,
-                "operating_cf": _row_pick_first(row, ["營業活動之淨現金流入（流出）", "營業現金流量"]),
-                "source": f"TWSE CSV:{url.rsplit('/', 1)[-1]}",
-            }
-            if any(_to_float(v) is not None for k, v in metrics.items() if k != "source"):
-                return metrics, None
-        except Exception:
-            continue
-
-    return {}, "公開觀測站 CSV 來源暫無可用欄位。"
-
-
-def _fetch_public_company_metrics(stock_id):
-    """公開資料 fallback：先試公開觀測站/證交所，再試 Yahoo Finance（免 key）。"""
-    sid = str(stock_id).strip()
-
-    twse_metrics, twse_warn = _fetch_twse_openapi_metrics(sid)
-    if twse_metrics:
-        return twse_metrics, twse_warn
-
-    csv_metrics, csv_warn = _fetch_twse_csv_metrics(sid)
-    if csv_metrics:
-        return csv_metrics, csv_warn
-
-    tickers = [f"{sid}.TW", f"{sid}.TWO"]
-
-    for ticker in tickers:
-        try:
-            url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
-            params = {"modules": "financialData,defaultKeyStatistics"}
-            resp = requests.get(url, params=params, timeout=20)
-            if resp.status_code >= 400:
-                continue
-
-            data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
-            result = (((data.get("quoteSummary") or {}).get("result") or [None])[0] or {}) if isinstance(data, dict) else {}
-            fin = result.get("financialData") or {}
-            stats = result.get("defaultKeyStatistics") or {}
-
-            def _raw(section, key):
-                obj = section.get(key)
-                if isinstance(obj, dict):
-                    return obj.get("raw")
-                return None
-
-            metrics = {
-                "latest_eps": _raw(stats, "trailingEps"),
-                "roe": (_raw(fin, "returnOnEquity") or 0) * 100 if _raw(fin, "returnOnEquity") is not None else None,
-                "roa": (_raw(fin, "returnOnAssets") or 0) * 100 if _raw(fin, "returnOnAssets") is not None else None,
-                "gross_margin": (_raw(fin, "grossMargins") or 0) * 100 if _raw(fin, "grossMargins") is not None else None,
-                "operating_cf": _raw(fin, "operatingCashflow"),
-                "source": f"Yahoo Finance:{ticker}",
-            }
-
-            if any(v is not None for k, v in metrics.items() if k != "source"):
-                return metrics, None
-        except Exception:
-            continue
-
-    return {}, f"{twse_warn or '公開觀測站來源不可用'}；{csv_warn or '公開觀測站 CSV 來源不可用'}；Yahoo Finance fallback 亦無可用結果。"
-
-def _build_search_queries(stock_name, sid):
-    """建立多角度查詢，納入公司、同產業、以及美股產業鏈訊號。"""
-    base = f"{stock_name} {sid}"
-    core_queries = [
-        (f"{base} 公司簡介 核心產品 產業地位", "公司定位"),
-        (f"{base} 最新新聞 訂單 客戶", "最新動態"),
-        (f"{base} 法說會 財測 資本支出 毛利率", "經營展望"),
-        (f"{base} 風險 匯率 原物料 地緣政治", "風險事件"),
-    ]
-    return core_queries + _build_macro_and_peer_queries(stock_name, sid)
-
-
-def _dedup_records(records):
-    seen = set()
-    deduped = []
-    for rec in records:
-        key = (rec.get("source", ""), rec.get("title", ""), rec.get("url", ""))
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(rec)
-    return deduped
-
-
-def _resolve_rag_config(cfg):
-    """讀取 RAG 設定；優先使用 llm.rag，並相容舊錯置到 search.rag 的情況。"""
-    llm_cfg = cfg.get("llm", {}) if isinstance(cfg, dict) else {}
-    search_cfg = cfg.get("search", {}) if isinstance(cfg, dict) else {}
-
-    llm_rag = llm_cfg.get("rag", {}) if isinstance(llm_cfg, dict) else {}
-    search_rag = search_cfg.get("rag", {}) if isinstance(search_cfg, dict) else {}
-    rag_cfg = llm_rag if llm_rag else search_rag
-
-    llm_api_key = _normalize_secret(llm_cfg.get("api_key")) if isinstance(llm_cfg, dict) else ""
-    search_api_key = _normalize_secret(search_cfg.get("api_key")) if isinstance(search_cfg, dict) else ""
-
-    return {
-        "enabled": str(rag_cfg.get("enabled", "false")).lower() == "true" if isinstance(rag_cfg, dict) else False,
-        "embedding_model": (rag_cfg.get("embedding_model") if isinstance(rag_cfg, dict) else None) or "nvidia/nv-embed-v1",
-        "top_k": int((rag_cfg.get("top_k") if isinstance(rag_cfg, dict) else 8) or 8),
-        "api_key": llm_api_key or search_api_key,
-    }
-
-
-def _embed_texts_nim(api_key, model, texts):
-    """呼叫 NVIDIA Embeddings API 取得向量。"""
-    if not api_key or not texts:
+            return []
+        return [{"title": "Perplexity 摘要", "snippet": content, "url": "", "source": "Perplexity"}]
+    except Exception:
         return []
 
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {"model": model, "input": texts}
-    resp = requests.post(
-        "https://integrate.api.nvidia.com/v1/embeddings",
-        headers=headers,
-        json=payload,
-        timeout=30,
+
+def _tokenize(text: str) -> set[str]:
+    return set(re.findall(r"[\u4e00-\u9fffA-Za-z0-9]+", str(text).lower()))
+
+
+def _simple_rag(query: str, documents: List[Dict[str, str]], top_k: int = 5) -> List[Dict[str, str]]:
+    q_tokens = _tokenize(query)
+    scored: List[Tuple[int, Dict[str, str]]] = []
+    for doc in documents:
+        d_tokens = _tokenize(f"{doc.get('title', '')} {doc.get('snippet', '')}")
+        score = len(q_tokens & d_tokens)
+        scored.append((score, doc))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [d for s, d in scored[:top_k] if s > 0] or documents[:top_k]
+
+
+def _collect_external_context(cfg: Dict[str, Any], stock_label: str, sid: str) -> Tuple[str, List[str]]:
+    warnings: List[str] = []
+    queries = [
+        f"{stock_label} {sid} 法說會 財報 展望",
+        f"{stock_label} {sid} 分點 籌碼",
+        f"{stock_label} {sid} 產業 景氣 上游 下游",
+    ]
+    docs: List[Dict[str, str]] = []
+    for q in queries:
+        docs.extend(_ddg_search(q, limit=4))
+
+    if not docs:
+        warnings.append("外部搜尋未取得結果（DDG）。")
+
+    # Optional search-LLM as an additional source
+    px_docs = _perplexity_search(cfg, f"{stock_label} {sid} 最新消息與風險")
+    if px_docs:
+        docs.extend(px_docs)
+    else:
+        warnings.append("Perplexity 未啟用或無回傳，已略過。")
+
+    rag_docs = _simple_rag(f"{stock_label} {sid} 基本面 分點 籌碼 預測", docs, top_k=8)
+    lines = []
+    for i, d in enumerate(rag_docs, start=1):
+        title = d.get("title", "")
+        snippet = d.get("snippet", "")
+        url = d.get("url", "")
+        lines.append(f"[{i}] {title}\n{snippet}\n來源: {url}")
+
+    return "\n\n".join(lines), warnings
+
+
+def _load_fundamental_data(conn, sid: str) -> Dict[str, Any]:
+    rev = _safe_read_sql(
+        conn,
+        """
+        SELECT date, revenue
+        FROM stock_month_revenue_monthly
+        WHERE stock_id=?
+        ORDER BY date DESC
+        LIMIT 12
+        """,
+        (sid,),
+    )
+    fin = _safe_read_sql(
+        conn,
+        """
+        SELECT date, type, value
+        FROM stock_financial_statements
+        WHERE stock_id=?
+        ORDER BY date DESC
+        LIMIT 300
+        """,
+        (sid,),
+    )
+    val = _safe_read_sql(
+        conn,
+        """
+        SELECT date, PER, dividend_yield
+        FROM stock_per_pbr_daily
+        WHERE stock_id=?
+        ORDER BY date DESC
+        LIMIT 20
+        """,
+        (sid,),
     )
 
-    data = resp.json() if resp.content else {}
-    if resp.status_code >= 400:
-        err_msg = data.get("error", {}).get("message", f"HTTP {resp.status_code}") if isinstance(data, dict) else f"HTTP {resp.status_code}"
-        raise RuntimeError(f"Embedding API 失敗：{err_msg}")
+    eps = None
+    roe = None
+    gross_margin = None
+    operating_cf = None
 
-    vectors = []
-    for row in data.get("data", []) if isinstance(data, dict) else []:
-        vec = row.get("embedding") if isinstance(row, dict) else None
-        if isinstance(vec, list):
-            vectors.append(vec)
-    return vectors
+    if not fin.empty:
+        fin2 = fin.copy()
+        fin2["value"] = fin2["value"].apply(_to_float)
 
+        def _pick(types: List[str]) -> float | None:
+            rows = fin2[fin2["type"].isin(types)]
+            if rows.empty:
+                return None
+            return rows.iloc[0]["value"]
 
-def _cosine_similarity(vec_a, vec_b):
-    if not vec_a or not vec_b or len(vec_a) != len(vec_b):
-        return -1.0
-    dot = sum(a * b for a, b in zip(vec_a, vec_b))
-    norm_a = math.sqrt(sum(a * a for a in vec_a))
-    norm_b = math.sqrt(sum(b * b for b in vec_b))
-    if norm_a == 0 or norm_b == 0:
-        return -1.0
-    return dot / (norm_a * norm_b)
+        eps = _pick(["EPS", "每股盈餘", "基本每股盈餘（元）"])
+        roe = _pick(["ROE", "ROE(%)", "Return on Equity", "權益報酬率"])
+        gross_margin = _pick(["Gross Margin", "Gross Margin(%)", "毛利率", "營業毛利率(%)"])
+        operating_cf = _pick(["Operating Cash Flow", "營業現金流", "營業活動之淨現金流入（流出）"])
 
+    rev_growth = None
+    if not rev.empty and len(rev) > 1:
+        newest = _to_float(rev.iloc[0]["revenue"])
+        oldest = _to_float(rev.iloc[-1]["revenue"])
+        if newest is not None and oldest not in {None, 0}:
+            rev_growth = (newest - oldest) / oldest * 100
 
-def _apply_rag_rerank(stock_name, sid, records, cfg):
-    """對外部搜集結果做 embedding 相似度排序，取 top-k。"""
-    rag_cfg = _resolve_rag_config(cfg)
-    if not rag_cfg["enabled"]:
-        return records, None
-    if not records:
-        return records, "RAG 已啟用，但目前沒有可重排序的外部資料。"
-    if not rag_cfg["api_key"]:
-        return records, "RAG 已啟用但缺少 API key（請設定 llm.api_key 或 search.api_key）。"
+    latest_per = _to_float(val.iloc[0]["PER"]) if not val.empty else None
+    latest_yield = _to_float(val.iloc[0]["dividend_yield"]) if not val.empty else None
 
-    top_k = max(1, min(rag_cfg["top_k"], len(records)))
-    query = f"{stock_name} {sid} 基本面 公司定位 新聞 風險"
-    doc_texts = [f"{r.get('title', '')}\n{r.get('snippet', '')}\n{r.get('url', '')}" for r in records]
-
-    try:
-        q_vecs = _embed_texts_nim(rag_cfg["api_key"], rag_cfg["embedding_model"], [query])
-        d_vecs = _embed_texts_nim(rag_cfg["api_key"], rag_cfg["embedding_model"], doc_texts)
-        if not q_vecs or len(d_vecs) != len(records):
-            return records, "RAG 重排序略過：embedding 回傳不完整。"
-
-        q_vec = q_vecs[0]
-        scored = []
-        for rec, d_vec in zip(records, d_vecs):
-            sim = _cosine_similarity(q_vec, d_vec)
-            scored.append((sim, rec))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        reranked = [rec for _, rec in scored[:top_k]]
-        return reranked, f"RAG 重排序已啟用：模型 {rag_cfg['embedding_model']}，保留 Top-{top_k}。"
-    except Exception as exc:
-        return records, f"RAG 重排序失敗，回退原始搜尋結果：{str(exc)}"
+    return {
+        "rev": rev,
+        "fin": fin,
+        "val": val,
+        "eps": eps,
+        "roe": roe,
+        "gross_margin": gross_margin,
+        "operating_cf": operating_cf,
+        "rev_growth": rev_growth,
+        "per": latest_per,
+        "yield": latest_yield,
+    }
 
 
-def _build_external_context(stock_name, sid, cfg):
-    """蒐集外部資訊（可配置付費/免費來源 + 社群網站搜尋）。"""
-    search_cfg = cfg.get("search", {})
-    preferred_provider = str(search_cfg.get("provider", "rss_then_wiki")).lower().strip()
-
-    records = []
-    warnings = []
-    topic_queries = _build_search_queries(stock_name, sid)
-
-    openrouter_queries_used = 0
-    openrouter_query_budget = int(search_cfg.get("openrouter_queries_per_run", 2) or 2)
-    use_ddg = str(search_cfg.get("enable_ddg", "false")).lower() == "true"
-
-    for query, tag in topic_queries:
-        if preferred_provider in {"openrouter", "openrouter_then_rss", "openrouter_then_ddg"} and openrouter_queries_used < openrouter_query_budget:
-            cache_key = f"or::{query}"
-            cached = _external_cache_get(cache_key)
-            if cached is not None:
-                records.extend(cached)
-            else:
-                or_records, or_warn = _openrouter_search(query, cfg)
-                records.extend(or_records)
-                if or_records:
-                    _external_cache_set(cache_key, or_records)
-                if or_warn and "未設定 openrouter_api_key" not in str(or_warn):
-                    warnings.append(f"[{tag}] {or_warn}")
-            openrouter_queries_used += 1
-        elif preferred_provider == "perplexity":
-            pplx_records, pplx_warn = _perplexity_search(query, cfg)
-            records.extend(pplx_records)
-            if pplx_warn:
-                warnings.append(f"[{tag}] {pplx_warn}")
-        elif preferred_provider == "puter":
-            put_records, put_warn = _puter_search(query, cfg)
-            records.extend(put_records)
-            if put_warn:
-                warnings.append(f"[{tag}] {put_warn}")
-
-        rss_records, rss_warn = _google_news_rss_search(query, max_results=2)
-        records.extend(rss_records)
-        if rss_warn:
-            warnings.append(f"[{tag}] {rss_warn}")
-
-        if use_ddg or preferred_provider == "openrouter_then_ddg":
-            ddg_records, ddg_warn = _ddg_search(query, max_results=2, source=f"DuckDuckGo/{tag}")
-            records.extend(ddg_records)
-            if ddg_warn:
-                warnings.append(f"[{tag}] {ddg_warn}")
-
-    wiki_records, wiki_warn = _wikipedia_summary_search(stock_name, sid)
-    records.extend(wiki_records)
-
-    # 社群/輿情（可選，避免 DDG 品質差時引入噪音）
-    if use_ddg:
-        social_queries = [
-            (f"site:x.com OR site:twitter.com {stock_name} {sid}", "X/Twitter"),
-            (f"site:facebook.com {stock_name} {sid}", "Facebook"),
-            (f"site:instagram.com {stock_name} {sid}", "Instagram"),
-        ]
-        for query, source in social_queries:
-            social_records, social_warn = _ddg_search(query, max_results=2, source=source)
-            records.extend(social_records)
-            if social_warn:
-                warnings.append(social_warn)
-
-    records = _dedup_records(records)
-    records, rag_warning = _apply_rag_rerank(stock_name, sid, records, cfg)
-    if rag_warning:
-        warnings.insert(0, rag_warning)
-
-    if not records:
-        warnings.insert(0, "目前未取得外部來源。請先檢查下方各來源診斷訊息。")
-        return "", warnings
-
-    source_counts = {}
-    tier_counts = {"A": 0, "B": 0, "C": 0}
-    for rec in records:
-        src = rec.get("source", "來源")
-        source_counts[src] = source_counts.get(src, 0) + 1
-        tier = rec.get("tier", "C")
-        tier_counts[tier] = tier_counts.get(tier, 0) + 1
-    summary = "、".join([f"{k}:{v}" for k, v in source_counts.items()])
-    tier_summary = "、".join([f"{k}:{v}" for k, v in tier_counts.items() if v > 0])
-    warnings.insert(0, f"外部來源抓取成功（{summary}；來源分級 {tier_summary}）。目前使用 Google News RSS / Wikipedia + 同產業/美股產業鏈查詢（可依設定切換其他來源）。")
-
-    lines = []
-    for rec in records[:24]:
-        url = rec.get("url", "")
-        url_text = f"（{url}）" if url else ""
-        lines.append(
-            f"- [{rec.get('source', '來源')}/Tier-{rec.get('tier', 'C')}] "
-            f"{rec.get('title', '')}: {rec.get('snippet', '')} {url_text}"
-        )
-    return "\n".join(lines), warnings
+def _load_branch_data(conn, sid: str, start_d, end_d) -> pd.DataFrame:
+    return _safe_read_sql(
+        conn,
+        """
+        SELECT date, securities_trader, buy, sell, price
+        FROM branch_price_daily
+        WHERE stock_id=? AND date >= ? AND date <= ?
+        """,
+        (sid, str(start_d), str(end_d)),
+    )
 
 
-def _fmt_metric(value, fallback="未提供"):
-    if value is None or value == "":
-        return fallback
-    return str(value)
+def _build_branch_summary(df: pd.DataFrame) -> Dict[str, Any]:
+    if df.empty:
+        return {"status": "無資料"}
+
+    g = (
+        df.groupby("securities_trader", as_index=False)
+        .agg(net_volume=("buy", "sum"), sell_volume=("sell", "sum"), avg_price=("price", "mean"))
+    )
+    g["net"] = g["net_volume"] - g["sell_volume"]
+    g = g.sort_values("net", ascending=False)
+
+    top_buy = g.head(5)[["securities_trader", "net", "avg_price"]]
+    top_sell = g.tail(5)[["securities_trader", "net", "avg_price"]]
+
+    return {
+        "status": "ok",
+        "top_buy": top_buy.to_dict(orient="records"),
+        "top_sell": top_sell.to_dict(orient="records"),
+        "total_net": float(g["net"].sum()),
+    }
 
 
-def _to_float(value):
-    if value is None:
-        return None
-    text = str(value).replace(",", "").replace("%", "").strip()
-    if text in {"", "未提供", "N/A", "nan"}:
-        return None
-    try:
-        return float(text)
-    except (TypeError, ValueError):
-        return None
+def _load_chip_data(conn, sid: str, start_d, end_d) -> Dict[str, Any]:
+    ohlcv = _safe_read_sql(
+        conn,
+        """
+        SELECT date, close, volume
+        FROM stock_ohlcv_daily
+        WHERE stock_id=? AND date >= ? AND date <= ?
+        ORDER BY date DESC
+        """,
+        (sid, str(start_d), str(end_d)),
+    )
+    branch = _load_branch_data(conn, sid, start_d, end_d)
+
+    latest_close = _to_float(ohlcv.iloc[0]["close"]) if not ohlcv.empty else None
+    avg_volume = _to_float(ohlcv["volume"].mean()) if not ohlcv.empty else None
+
+    net = None
+    concentration = None
+    if not branch.empty:
+        gp = branch.groupby("securities_trader", as_index=False).agg(buy=("buy", "sum"), sell=("sell", "sum"))
+        gp["net"] = gp["buy"] - gp["sell"]
+        total_buy = gp["buy"].sum()
+        top5_buy = gp.sort_values("buy", ascending=False).head(5)["buy"].sum()
+        concentration = (top5_buy / total_buy * 100) if total_buy else None
+        net = gp["net"].sum()
+
+    return {
+        "latest_close": latest_close,
+        "avg_volume": avg_volume,
+        "net": net,
+        "concentration": concentration,
+    }
 
 
-def _free_score_label(score):
-    if score >= 2:
-        return "偏多"
-    if score <= -2:
-        return "偏保守"
-    return "中性"
-
-
-def _normalize_metric_name(name):
-    text = str(name or "").strip().lower()
-    if not text:
-        return ""
-    text = text.replace("％", "%")
-    text = re.sub(r"[\s_\-（）()\[\]{}：:.,，。%]", "", text)
-    return text
-
-
-def _latest_metric_value(financial_df, metric_names):
-    """從財報明細中取出指定指標的最新值。"""
-    if financial_df.empty:
-        return None
-
-    norm_names = {_normalize_metric_name(n) for n in metric_names if str(n).strip()}
-    if not norm_names:
-        return None
-
-    types = financial_df["type"].astype(str).map(_normalize_metric_name)
-    matched = financial_df[types.isin(norm_names)]
-    if matched.empty:
-        return None
-    return matched.iloc[0]["value"]
-
-
-def _fmt_percent(value):
-    val = _to_float(value)
-    if val is None:
-        return "未提供"
-    return f"{val:.2f}%"
-
-
-def _compute_data_quality(metrics):
-    required = [
-        "latest_eps",
-        "prev_eps",
-        "latest_revenue",
-        "oldest_revenue",
-        "revenue_growth",
-        "roe",
-        "roa",
-        "gross_margin",
-        "operating_cf",
-    ]
-    available = sum(1 for key in required if _to_float(metrics.get(key)) is not None)
-    ratio = available / len(required)
-
-    if ratio >= 0.8:
-        return "高", ratio
-    if ratio >= 0.5:
-        return "中", ratio
-    return "低", ratio
-
-
-def _build_free_fundamental_report(stock_name, sid, search_ctx, metrics):
-    latest_eps = _to_float(metrics.get("latest_eps"))
-    prev_eps = _to_float(metrics.get("prev_eps"))
-    revenue_growth = _to_float(metrics.get("revenue_growth"))
-
-    eps_trend = "資料不足"
-    if latest_eps is not None and prev_eps is not None:
-        eps_trend = "成長" if latest_eps > prev_eps else ("下滑" if latest_eps < prev_eps else "持平")
-
+def _build_prediction_input(fund: Dict[str, Any], chip: Dict[str, Any]) -> Dict[str, Any]:
     score = 0
-    if latest_eps is not None:
-        score += 1 if latest_eps > 0 else -1
-    if revenue_growth is not None:
-        score += 1 if revenue_growth > 0 else -1
-    if latest_eps is not None and prev_eps is not None and latest_eps > prev_eps:
+    if (fund.get("rev_growth") or 0) > 0:
+        score += 1
+    if (fund.get("eps") or 0) > 0:
+        score += 1
+    if (fund.get("roe") or 0) > 8:
+        score += 1
+    if (chip.get("net") or 0) > 0:
+        score += 1
+    if (chip.get("concentration") or 0) < 35:
         score += 1
 
-    risk_note = "市場景氣循環與產業競爭可能影響營收與獲利。"
-    if latest_eps is not None and latest_eps < 0:
-        risk_note = "目前 EPS 為負，需優先關注虧損收斂與現金流品質。"
-    elif revenue_growth is not None and revenue_growth < 0:
-        risk_note = "近期營收成長率為負，需留意需求放緩或產品組合變化。"
+    if score >= 4:
+        regime = "偏多"
+    elif score <= 1:
+        regime = "偏空"
+    else:
+        regime = "區間"
 
-    ext_note = "未取得外部新聞摘要。"
-    if search_ctx:
-        ext_note = "已納入 RSS / Wikipedia 等外部摘要，並交叉對照資料庫數據。"
+    return {"score": score, "regime": regime}
 
-    data_quality_level, data_quality_ratio = _compute_data_quality(metrics)
 
-    # 更細緻的規則化判讀（避免只給方向、不給條件）
-    quality_flags = []
-    if latest_eps is not None:
-        quality_flags.append("EPS 為正" if latest_eps > 0 else "EPS 為負")
-    if latest_eps is not None and prev_eps is not None:
-        delta = latest_eps - prev_eps
-        quality_flags.append(f"單季 EPS 變動 {delta:+.2f}")
-    if revenue_growth is not None:
-        quality_flags.append(f"營收成長率 {revenue_growth:+.2f}%")
+def _fallback_report(stock_label: str, sid: str, section: str, data: Dict[str, Any], context: str) -> str:
+    return (
+        f"### {section}（規則化報告）\n"
+        f"標的: {stock_label} ({sid})\n\n"
+        f"- 核心資料: `{data}`\n"
+        f"- 外部資訊摘要（RAG 節選）:\n{context[:1200]}"
+    )
 
-    valuation_hint = "資料不足，暫不給估值區間。"
-    if latest_eps is not None and latest_eps > 0:
-        valuation_hint = (
-            "可用『EPS × 本益比』做情境估值：\n"
-            "- 保守情境：景氣下行或接單保守時，給較低本益比。\n"
-            "- 基準情境：營收止跌、EPS 持平成長時，給中位本益比。\n"
-            "- 樂觀情境：新品放量或產能利用率提升時，給偏高本益比。"
-        )
 
-    action_items = [
-        "追蹤未來 2~3 季 EPS 是否維持年增與季增的其中至少一項為正。",
-        "確認月營收是否出現連續 2 個月以上年增回正。",
-        "檢視營業現金流與淨利是否同步改善，避免『帳上獲利、現金未進』。",
-    ]
-    action_text = "\n- " + "\n- ".join(action_items)
+def _render_section_with_llm(cfg: Dict[str, Any], task: str, section_title: str, stock_label: str, sid: str, data: Dict[str, Any], context: str):
+    llm_enabled = bool(_normalize_secret(cfg.get("llm", {}).get("api_key")))
+    prompt = f"""
+你現在要撰寫「{section_title}」段落，標的是 {stock_label}({sid})。
+請基於提供資料給出：
+1) 目前狀態判讀
+2) 2~3 個關鍵風險
+3) 2~3 個後續追蹤指標
+4) 最後一句操作建議（非投資保證）
 
-    return f"""
-## 公司簡介
-{stock_name}（{sid}）為台股上市櫃公司，本報告採用內部資料庫財報欄位與免費外部搜尋摘要進行整理。
+【資料】
+{data}
 
-## 財務分析
-目前觀察到 EPS 趨勢為「{eps_trend}」，整體財務動能判讀為「{_free_score_label(score)}」。
-{ext_note}
-分析重點以「獲利連續性（EPS）＋成長方向（營收）＋資產品質（ROE/ROA/現金流）」三軸交叉判讀。
-目前訊號：{'；'.join(quality_flags) if quality_flags else '資料不足'}。
-
-### 財務指標
-- EPS：{_fmt_metric(metrics.get('latest_eps'))}
-- ROE（股東權益報酬率）：{_fmt_percent(metrics.get('roe'))}
-- ROA（資產報酬率）：{_fmt_percent(metrics.get('roa'))}
-- 營收成長率：{_fmt_metric(metrics.get('revenue_growth'))}
-- 毛利率：{_fmt_percent(metrics.get('gross_margin'))}
-
-## 營收分析
-近 12 月營收由 { _fmt_metric(metrics.get('oldest_revenue')) } 億變化至 { _fmt_metric(metrics.get('latest_revenue')) } 億，成長率為 { _fmt_metric(metrics.get('revenue_growth')) }。
-若成長率轉弱，通常代表終端需求、產品價格或出貨節奏承壓。
-
-## 毛利率分析
-目前資料庫未提供可直接計算的最新毛利率欄位，建議後續補齊季報毛利率以提升判讀精度。
-
-## 現金流量分析
-營業現金流（Operating Cash Flow）：{_fmt_metric(metrics.get('operating_cf'))}。
-若營收與獲利成長但現金流未同步改善，需留意應收帳款、庫存與資本支出壓力。
-
-## 投資評價
-- 短期評價：{_free_score_label(score)}（以營收與 EPS 最新變化為主）
-- 中期評價：中性偏基本面驗證（需追蹤連續 2~3 季 EPS 與營收是否同向）
-- 長期評價：取決於產品競爭力、資本支出效率、自由現金流與景氣循環位置
-- 目標價格：{valuation_hint}
-
-## 風險評估
-- 市場風險：受總體景氣、利率與資金面影響
-- 財務風險：{risk_note}
-- 法規/政策風險：需留意產業政策、出口管制與會計準則變動
-
-## 結論
-本次為「強化版免費 AI 基本面分析」，以可驗證數據做規則化摘要；若啟用 LLM 可再進一步做脈絡整合。
-目前資料完整度評估：{data_quality_level}（{data_quality_ratio:.0%}）。
-建議後續持續追蹤：{action_text}
-另可搭配重大新聞事件追蹤訂單能見度與毛利率變化，以避免只看單季數字造成誤判。
+【外部資訊（RAG 節選）】
+{context}
 """.strip()
+    if llm_enabled:
+        try:
+            text = _call_nim(
+                cfg,
+                task=task,
+                system_prompt="你是台股研究員，嚴禁虛構，優先引用給定資料。",
+                user_prompt=prompt,
+            )
+            st.markdown(text)
+            return
+        except Exception as exc:
+            st.warning(f"{section_title} LLM 失敗，改用規則化輸出：{exc}")
 
+    st.markdown(_fallback_report(stock_label, sid, section_title, data, context))
 
-def _build_fundamental_prompt(stock_name, sid, search_ctx, metrics):
-    """建立固定章節格式的基本面分析 Prompt。"""
-    return f"""
-請你扮演台股資深基本面分析師，針對 {stock_name}（{sid}）撰寫報告。
-
-【重要規則】
-1) 嚴格使用以下固定格式與標題順序，不要增減章節。
-2) 若資料不足，請明確寫「未提供」或「資料不足」，禁止虛構。
-3) 所有數值盡量引用我提供的資料；若引用新聞，僅能使用「搜尋事實摘要」。
-4) 若有外部事件，請在句尾加上對應來源網址（可多筆）。
-5) 以繁體中文輸出。
-
-【固定輸出格式】
-## 公司簡介
-（公司定位、核心產品/服務、主要市場）
-
-## 財務分析
-（整體獲利能力與近況，2-4 句）
-
-### 財務指標
-- EPS：
-- ROE（股東權益報酬率）：
-- ROA（資產報酬率）：
-- 營收成長率：
-- 毛利率：
-
-## 營收分析
-（營收趨勢、可能驅動因子）
-
-## 毛利率分析
-（毛利率水準與可能原因；若無資料請寫未提供）
-
-## 現金流量分析
-（現金流量狀況與品質；若無資料請寫未提供）
-
-## 投資評價
-- 短期評價：
-- 中期評價：
-- 長期評價：
-- 目標價格：
-
-## 風險評估
-- 市場風險：
-- 財務風險：
-- 法規/政策風險：
-
-## 結論
-（總結投資觀點與關鍵追蹤指標）
-
-【可用資料】
-- 搜尋事實摘要：{search_ctx if search_ctx else '未提供'}
-- 最新季度 EPS：{metrics.get('latest_eps', '未提供')}
-- 上季 EPS：{metrics.get('prev_eps', '未提供')}
-- 近 12 月最新營收（億元）：{metrics.get('latest_revenue', '未提供')}
-- 近 12 月最舊營收（億元）：{metrics.get('oldest_revenue', '未提供')}
-- 估算營收成長率（最新 vs 最舊）：{metrics.get('revenue_growth', '未提供')}
-- ROE：{metrics.get('roe', '未提供')}
-- ROA：{metrics.get('roa', '未提供')}
-- 毛利率：{metrics.get('gross_margin', '未提供')}
-- 營業現金流：{metrics.get('operating_cf', '未提供')}
-""".strip()
-
-# 1. 核心 AI 呼叫工具 (保持穩定，未更動)
-def _call_nim_fundamental(cfg, prompt):
-    llm_cfg = cfg.get("llm", {})
-    api_key = _normalize_secret(llm_cfg.get("api_key"))
-    model_name = get_llm_model(cfg, "fundamental", "meta/llama-3.1-70b-instruct")
-    if not api_key:
-        raise ValueError("llm.api_key 未設定。")
-
-    url = "https://integrate.api.nvidia.com/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {
-        "model": model_name,
-        "messages": [
-            {"role": "system", "content": "你是一位專業的證券分析師。請優先參考連網搜尋到的事實，結合財務數據給出具體的投資評價，嚴禁虛構公司業務。"},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.1
-    }
-    resp = requests.post(url, headers=headers, json=payload, timeout=60)
-    try:
-        data = resp.json()
-    except Exception:
-        data = {}
-
-    if resp.status_code >= 400:
-        err_msg = data.get("error", {}).get("message") if isinstance(data, dict) else None
-        raise RuntimeError(err_msg or f"NIM API 呼叫失敗（HTTP {resp.status_code}）。")
-
-    content = data.get("choices", [{}])[0].get("message", {}).get("content", "") if isinstance(data, dict) else ""
-    if not content:
-        raise RuntimeError("NIM API 未回傳可用內容。")
-    return content
 
 def show_fundamental_analysis():
-    st.markdown("### 💎 基本面數據全覽與 AI 診斷")
+    st.markdown("### 💎 四段式整合分析（基本面 / 分點 / 籌碼 / 預測）")
+
     cfg = database.load_config()
     conn = database.get_db_connection(cfg)
     universe = cfg.get("universe", [])
-    stock_options = {f"{s['stock_id']} {s['name']}": s['stock_id'] for s in universe}
-    
-    selected_stock = st.selectbox("請選擇分析標的", list(stock_options.keys()))
-    sid = stock_options[selected_stock]
-    
-    # 統一基準日
-    def_s = pd.to_datetime("today") - pd.Timedelta(days=60)
-    def_e = pd.to_datetime("today")
-    f_range = st.date_input("數據觀察基準日", value=[def_s, def_e])
-    end_d = f_range[1] if len(f_range) == 2 else def_e
+    stock_options = {f"{s['stock_id']} {s['name']}": s["stock_id"] for s in universe}
+    if not stock_options:
+        st.error("universe 未設定，請先在設定檔配置標的。")
+        conn.close()
+        return
 
-    st.divider()
+    c1, c2 = st.columns([2, 2])
+    with c1:
+        selected_label = st.selectbox("分析標的", list(stock_options.keys()))
+        sid = stock_options[selected_label]
+    with c2:
+        def_s = pd.to_datetime("today") - pd.Timedelta(days=90)
+        def_e = pd.to_datetime("today")
+        date_range = st.date_input("分析區間", value=[def_s, def_e])
 
-    # --- 1. 數據抓取與格式化 ---
-    
-    # (1) 每月營收：除以 1000 並加上千分位 ","
-    rev_query = f"SELECT date as '日期', revenue FROM stock_month_revenue_monthly WHERE stock_id='{sid}' ORDER BY date DESC LIMIT 12"
-    rev_df = pd.read_sql(rev_query, conn)
-    if not rev_df.empty:
-        # ✅ 修正關鍵：統一欄位名稱為 '營收(億)'，並加上千分位
-        rev_df['營收(億)'] = (rev_df['revenue'] / 100000000).apply(lambda x: f"{x:,.2f}")
-        rev_df = rev_df[['日期', '營收(億)']]
-    
-    # (2+4) 每季獲利與 EPS：安全轉置處理
-    metric_candidates = [
-        "EPS", "Net Profit", "ROE", "ROE(%)", "Return on Equity",
-        "ROA", "ROA(%)", "Return on Assets",
-        "Gross Margin", "Gross Margin(%)", "毛利率",
-        "Operating Cash Flow", "營業活動之淨現金流入（流出）", "營業現金流",
-    ]
-    metric_filter = ", ".join([f"'{m}'" for m in metric_candidates])
-    profit_raw = pd.read_sql(
-        f"SELECT date, type, value FROM stock_financial_statements WHERE stock_id='{sid}' AND type IN ({metric_filter}) ORDER BY date DESC LIMIT 200",
-        conn,
+    if not isinstance(date_range, (list, tuple)) or len(date_range) != 2:
+        st.warning("請選擇完整日期區間。")
+        conn.close()
+        return
+
+    start_d, end_d = pd.to_datetime(date_range[0]).date(), pd.to_datetime(date_range[1]).date()
+
+    st.caption(
+        "模型策略：基本面/預測使用較強推理 LLM；分點/籌碼優先結構化資料計算；"
+        "外部消息使用搜尋引擎 +（可選）Perplexity，再經簡易 RAG 節選。"
     )
-    if not profit_raw.empty:
-        profit_df = profit_raw.pivot(index='date', columns='type', values='value').reset_index()
-        # 安全重命名
-        rename_map = {'date': '季度', 'EPS': 'EPS', 'Net Profit': '每季獲利'}
-        profit_df = profit_df.rename(columns={k: v for k, v in rename_map.items() if k in profit_df.columns})
-        # 加上千分位 (每季獲利)
-        if '每季獲利' in profit_df.columns:
-            profit_df['每季獲利'] = profit_df['每季獲利'].apply(lambda x: f"{x:,.0f}" if pd.notnull(x) else "N/A")
-    else:
-        profit_df = pd.DataFrame()
+    st.info(
+        f"LLM Key: {_mask_secret(cfg.get('llm', {}).get('api_key'))} | "
+        f"Perplexity Key: {_mask_secret(cfg.get('search', {}).get('perplexity_api_key'))}"
+    )
 
-    # (3+5) 本益比與殖利率
-    val_query = f"SELECT date as '日期', PER as '本益比', dividend_yield as '殖利率%' FROM stock_per_pbr_daily WHERE stock_id='{sid}' AND date <= '{end_d}' ORDER BY date DESC LIMIT 10"
-    valuation_df = pd.read_sql(val_query, conn)
+    run = st.button("🚀 產生四段式分析", use_container_width=True)
 
-    # (6+7) 現金股利與股息分配
-    div_query = f"SELECT year as '年份', CashEarningsDistribution as '現金股利', StockEarningsDistribution as '股票股利' FROM stock_dividend WHERE stock_id='{sid}' ORDER BY year DESC LIMIT 5"
-    div_df = pd.read_sql(div_query, conn)
+    if run:
+        with st.spinner("蒐集資料與建模中..."):
+            context, warnings = _collect_external_context(cfg, selected_label, sid)
+            for w in warnings:
+                st.warning(w)
 
-    # --- 2. 表格化顯示分頁 ---
-    tab1, tab2, tab3 = st.tabs(["📈 營收與獲利詳情", "💰 股利與估值看板", "🔍 AI 聯網趨勢報告"])
+            fundamental = _load_fundamental_data(conn, sid)
+            branch_df = _load_branch_data(conn, sid, start_d, end_d)
+            branch = _build_branch_summary(branch_df)
+            chip = _load_chip_data(conn, sid, start_d, end_d)
+            prediction = _build_prediction_input(fundamental, chip)
 
-    with tab1:
-        st.write("#### 1. 每月營收 (單位：百萬元)")
-        st.dataframe(rev_df, use_container_width=True, hide_index=True)
-        
-        st.write("#### 2 & 4. 每季獲利與 EPS 歷程")
-        if not profit_df.empty:
-            # 確保僅顯示現有欄位
-            cols_to_show = [c for c in ['季度', '每季獲利', 'EPS'] if c in profit_df.columns]
-            st.dataframe(profit_df[cols_to_show], use_container_width=True, hide_index=True)
-        else:
-            st.info("尚無獲利數據。")
+        t1, t2, t3, t4 = st.tabs(["📘 基本面分析", "🏦 分點分析", "🧩 籌碼分析", "🔮 預測"])
 
-    with tab2:
-        st.write("#### 3 & 5. 本益比與殖利率變動")
-        st.dataframe(valuation_df, use_container_width=True, hide_index=True)
-        
-        st.write("#### 6 & 7. 歷年股利分配 (現金與股票)")
-        if not div_df.empty:
-            st.table(div_df)
-        else:
-            st.info("尚無股利歷史數據。")
+        with t1:
+            st.dataframe(fundamental.get("rev", pd.DataFrame()).head(12), use_container_width=True, hide_index=True)
+            _render_section_with_llm(cfg, "fundamental", "基本面分析", selected_label, sid, {
+                "eps": fundamental.get("eps"),
+                "roe": fundamental.get("roe"),
+                "gross_margin": fundamental.get("gross_margin"),
+                "operating_cf": fundamental.get("operating_cf"),
+                "rev_growth_%": fundamental.get("rev_growth"),
+                "per": fundamental.get("per"),
+                "dividend_yield": fundamental.get("yield"),
+            }, context)
 
-    with tab3:
-        llm_cfg = cfg.get("llm", {})
-        llm_available = bool(_normalize_secret(llm_cfg.get("api_key")))
+        with t2:
+            st.dataframe(branch_df.head(30), use_container_width=True, hide_index=True)
+            _render_section_with_llm(cfg, "branch", "分點分析", selected_label, sid, branch, context)
 
-        use_llm = st.toggle(
-            "啟用 LLM 強化分析（可選）",
-            value=llm_available,
-            help="若已設定 llm.api_key，建議開啟；未啟用時系統將使用免費規則化摘要。",
-        )
-        model_name = st.text_input(
-            "LLM 模型（NVIDIA NIM）",
-            value=get_llm_model(cfg, "fundamental", "meta/llama-3.1-70b-instruct"),
-            disabled=not use_llm,
-        )
+        with t3:
+            st.json(chip)
+            _render_section_with_llm(cfg, "chip", "籌碼分析", selected_label, sid, chip, context)
 
-        if use_llm and not llm_available:
-            st.warning("目前未設定 llm.api_key，將自動回退到免費規則化報告。")
-
-        if llm_available:
-            st.success(f"✅ 已偵測到 llm.api_key（{_mask_secret(llm_cfg.get('api_key'))}），可直接使用 {model_name} 進行強化分析。")
-        st.info("💡 改善建議：系統會先做多查詢聯網蒐集，再交給 LLM 整合；效果會比只靠模型記憶好。")
-        st.caption("此頁支援純 NVIDIA LLM 分析；若未設定 llm.api_key，系統會自動使用免費規則化報告。")
-
-        run_btn_label = "🚀 啟動 AI 基本面分析（LLM 強化）" if use_llm else "🚀 啟動 AI 基本面分析（免費規則化）"
-        # ✅ 保留聯網搜尋邏輯
-        if st.button(run_btn_label, use_container_width=True):
-            with st.spinner("正在搜尋最新產業地位與市場新聞..."):
-                search_ctx, search_warnings = _build_external_context(selected_stock, sid, cfg)
-                if search_warnings:
-                    for w in search_warnings:
-                        if w.startswith("外部來源抓取成功"):
-                            st.success(w)
-                        else:
-                            st.warning(w)
-                
-                # 獲取 AI 參考數據
-                latest_eps = profit_df['EPS'].iloc[0] if ('EPS' in profit_df.columns and not profit_df.empty) else "未提供"
-                prev_eps = profit_df['EPS'].iloc[1] if ('EPS' in profit_df.columns and len(profit_df) > 1) else "未提供"
-
-                latest_revenue = rev_df['營收(億)'].iloc[0] if not rev_df.empty else "未提供"
-                oldest_revenue = rev_df['營收(億)'].iloc[-1] if not rev_df.empty else "未提供"
-
-                revenue_growth = "未提供"
-                if not rev_df.empty and len(rev_df) > 1:
-                    rev_num = pd.to_numeric(rev_df['營收(億)'].str.replace(',', ''), errors='coerce')
-                    latest_rev_num = rev_num.iloc[0]
-                    oldest_rev_num = rev_num.iloc[-1]
-                    if pd.notnull(latest_rev_num) and pd.notnull(oldest_rev_num) and oldest_rev_num != 0:
-                        revenue_growth = f"{((latest_rev_num - oldest_rev_num) / oldest_rev_num) * 100:.2f}%"
-
-                metrics = {
-                    "latest_eps": latest_eps,
-                    "prev_eps": prev_eps,
-                    "latest_revenue": latest_revenue,
-                    "oldest_revenue": oldest_revenue,
-                    "revenue_growth": revenue_growth,
-                    "roe": _latest_metric_value(profit_raw, ["ROE", "Return on Equity", "ROE(%)", "權益報酬率", "股東權益報酬率"]),
-                    "roa": _latest_metric_value(profit_raw, ["ROA", "Return on Assets", "ROA(%)", "資產報酬率"]),
-                    "gross_margin": _latest_metric_value(profit_raw, ["Gross Margin", "Gross Margin(%)", "毛利率", "營業毛利率", "營業毛利率(%)"]),
-                    "operating_cf": _latest_metric_value(profit_raw, ["Operating Cash Flow", "營業活動之淨現金流入（流出）", "營業現金流", "營業現金流量"]),
-                }
-
-                # 公開資料 fallback：當內部資料不足時補齊關鍵指標
-                missing_keys = [k for k in ["latest_eps", "roe", "roa", "gross_margin", "operating_cf"] if _to_float(metrics.get(k)) is None]
-                if missing_keys:
-                    public_metrics, public_warn = _fetch_public_company_metrics(sid)
-                    if public_warn:
-                        st.info(public_warn)
-                    if public_metrics:
-                        for k in missing_keys:
-                            if _to_float(metrics.get(k)) is None and public_metrics.get(k) is not None:
-                                metrics[k] = public_metrics[k]
-                        st.info(f"已使用公開資料補齊部分財務欄位（來源：{public_metrics.get('source', '公開來源')}）。")
-
-                if use_llm and llm_available:
-                    cfg.setdefault("llm", {}).setdefault("models", {})["fundamental"] = model_name
-                    prompt = _build_fundamental_prompt(selected_stock, sid, search_ctx, metrics)
-                    try:
-                        ai_report = _call_nim_fundamental(cfg, prompt)
-                        st.markdown(ai_report)
-                    except Exception as exc:
-                        st.error(f"LLM 呼叫失敗，改用免費規則化報告：{str(exc)}")
-                        st.markdown(_build_free_fundamental_report(selected_stock, sid, search_ctx, metrics))
-                else:
-                    st.markdown(_build_free_fundamental_report(selected_stock, sid, search_ctx, metrics))
+        with t4:
+            st.json(prediction)
+            _render_section_with_llm(cfg, "prediction", "預測", selected_label, sid, {
+                "prediction": prediction,
+                "fundamental": {
+                    "rev_growth_%": fundamental.get("rev_growth"),
+                    "eps": fundamental.get("eps"),
+                    "roe": fundamental.get("roe"),
+                },
+                "chip": chip,
+            }, context)
 
     conn.close()
