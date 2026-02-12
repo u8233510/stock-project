@@ -34,6 +34,24 @@ def _search_news(ddgs: DDGS, query: str, timelimit: str) -> list[dict]:
     return []
 
 
+def _is_relevant_news(item: dict, sid: str, sname: str) -> bool:
+    """以股票代碼/名稱做基礎相關性過濾，降低無關新聞。"""
+    text = " ".join([
+        str(item.get("title", "")),
+        str(item.get("body", "")),
+        str(item.get("snippet", "")),
+        str(item.get("url", "")),
+        str(item.get("href", "")),
+    ]).lower()
+
+    sid_txt = str(sid).strip().lower()
+    sname_txt = str(sname).strip().lower()
+
+    sid_hit = sid_txt and sid_txt in text
+    name_hit = sname_txt and sname_txt in text
+    return bool(sid_hit or name_hit)
+
+
 def render_stock_news(sid: str, sname: str):
     """
     主要渲染函數：搜尋並顯示指定股票的最新 10 則新聞
@@ -42,8 +60,9 @@ def render_stock_news(sid: str, sname: str):
     """
     st.subheader(f"🌐 {sname} ({sid}) 最新相關新聞")
 
-    # 1. 建立搜尋關鍵字（多組 fallback，避免單一 query 無資料）
+    # 1. 建立搜尋關鍵字（優先精準詞，降低無關結果）
     queries = [
+        f"{sname} {sid} 台股 新聞",
         f"{sname} {sid} 股票 新聞",
         f"{sname} 股票 新聞",
         f"{sid} 股票 新聞",
@@ -55,17 +74,25 @@ def render_stock_news(sid: str, sname: str):
     try:
         with st.spinner("正在從網路搜尋最新動態..."):
             news_list = []
-            # 2. 使用 DuckDuckGo 進行新聞搜尋（逐步放寬條件）
+            # 2. 使用 DuckDuckGo 進行新聞搜尋，並做股票名稱/代碼過濾
             with DDGS() as ddgs:
+                best_fallback = []
                 for query in queries:
                     fetched = _search_news(ddgs, query, timelimit)
-                    if fetched:
-                        news_list = fetched
+                    if fetched and not best_fallback:
+                        best_fallback = fetched
+
+                    relevant = [n for n in fetched if _is_relevant_news(n, sid, sname)]
+                    if relevant:
+                        news_list = relevant
                         break
+
+                if not news_list:
+                    news_list = best_fallback
 
         # 3. 呈現搜尋結果
         if not news_list:
-            st.warning("目前找不到相關新聞（已嘗試代碼/名稱、近一年範圍），請稍後再試。")
+            st.warning("目前找不到相關新聞（已嘗試多組關鍵字與近一年範圍），請稍後再試。")
             return
 
         for news in news_list[:10]:
