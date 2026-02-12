@@ -7,6 +7,7 @@ import streamlit as st
 from ddgs import DDGS
 
 import database
+from modules.llm_model_selector import get_llm_model
 
 
 def _search_news(ddgs: DDGS, query: str, timelimit: str) -> list[dict]:
@@ -241,10 +242,65 @@ def _render_news_list(news_list: list[dict], source_label: str):
             st.divider()
 
 
-def render_stock_news(sid: str, sname: str, serper_api_key: str | None = None):
+def _summarize_news(cfg: dict, sid: str, sname: str, source_label: str, news_list: list[dict]) -> str:
+    if not news_list:
+        return "目前沒有可供總結的新聞內容。"
+
+    llm_cfg = cfg.get("llm", {}) if isinstance(cfg, dict) else {}
+    api_key = llm_cfg.get("api_key", "")
+    if not api_key:
+        return "⚠️ 尚未設定 LLM API Key（llm.api_key），目前無法產生新聞總結。"
+
+    news_lines = []
+    for idx, item in enumerate(news_list[:10], start=1):
+        title = str(item.get("title", "(無標題)")).strip()
+        snippet = str(item.get("body", "")).strip()[:220]
+        date_str = str(item.get("date", "")).strip()
+        source = str(item.get("source", source_label)).strip()
+        url = str(item.get("url") or item.get("href", "") or item.get("link", "")).strip()
+        news_lines.append(
+            f"{idx}. [{source}] {title}\n日期：{date_str or '未知'}\n摘要：{snippet or '（無摘要）'}\n連結：{url or '（無連結）'}"
+        )
+
+    prompt = (
+        f"請以繁體中文總結 {sname}（{sid}）的 {source_label} 新聞，並輸出：\n"
+        "1) 三點重點\n"
+        "2) 對股價可能的偏多/偏空影響（短期）\n"
+        "3) 需要追蹤的風險事件\n"
+        "內容請精簡、避免杜撰，若資訊不足請明確標示。\n\n"
+        f"新聞資料：\n{chr(10).join(news_lines)}"
+    )
+
+    payload = {
+        "model": get_llm_model(cfg, "fundamental"),
+        "messages": [
+            {"role": "system", "content": "你是專業台股研究助理，僅能根據給定新聞進行整理，不可捏造。"},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 1200,
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    resp = requests.post("https://integrate.api.nvidia.com/v1/chat/completions", headers=headers, json=payload, timeout=120)
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
+
+
+def _render_summary_button(cfg: dict, sid: str, sname: str, source_label: str, news_list: list[dict], key: str):
+    if st.button(f"🧠 總結 {source_label} 新聞", use_container_width=True, key=key):
+        with st.spinner(f"正在整理 {source_label} 新聞重點..."):
+            try:
+                summary = _summarize_news(cfg, sid, sname, source_label, news_list)
+                st.markdown(summary)
+            except Exception as e:
+                st.error(f"{source_label} 新聞總結失敗：{str(e)}")
+
+
+def render_stock_news(sid: str, sname: str, cfg: dict | None = None, serper_api_key: str | None = None):
     """顯示 DGS 與 SERPER 兩種來源新聞（最新到最舊，最多 10 筆）。"""
     st.subheader(f"🌐 {sname} ({sid}) 最新相關新聞")
 
+    cfg = cfg or database.load_config()
     tab_dgs, tab_serper = st.tabs(["DGS", "SERPER"])
 
     with tab_dgs:
@@ -252,6 +308,7 @@ def render_stock_news(sid: str, sname: str, serper_api_key: str | None = None):
             with st.spinner("DGS 正在搜尋最新動態..."):
                 dgs_news = _fetch_dgs_news(sid, sname, timelimit="y")
             _render_news_list(dgs_news, "DGS")
+            _render_summary_button(cfg, sid, sname, "DGS", dgs_news, key=f"sum_dgs_{sid}")
         except Exception as e:
             st.error(f"DGS 搜尋新聞時發生錯誤：{str(e)}")
 
@@ -263,6 +320,7 @@ def render_stock_news(sid: str, sname: str, serper_api_key: str | None = None):
             with st.spinner("SERPER 正在搜尋最新動態..."):
                 serper_news = _fetch_serper_news(sid, sname, serper_api_key)
             _render_news_list(serper_news, "SERPER")
+            _render_summary_button(cfg, sid, sname, "SERPER", serper_news, key=f"sum_serper_{sid}")
         except Exception as e:
             st.error(f"SERPER 搜尋新聞時發生錯誤：{str(e)}")
 
@@ -283,7 +341,7 @@ def show_fundamental_analysis():
     serper_api_key = cfg.get("search", {}).get("serper_api_key", "")
 
     if st.button("🔍 搜尋最新新聞", use_container_width=True):
-        render_stock_news(sid, sname, serper_api_key=serper_api_key)
+        render_stock_news(sid, sname, cfg=cfg, serper_api_key=serper_api_key)
 
 
 if __name__ == "__main__":
