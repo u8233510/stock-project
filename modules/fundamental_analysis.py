@@ -1,4 +1,3 @@
-import re
 from typing import Any, Dict, List, Tuple
 
 import pandas as pd
@@ -74,17 +73,18 @@ def _call_nim(cfg: Dict[str, Any], task: str, system_prompt: str, user_prompt: s
     return text
 
 
-def _ddg_search(query: str, limit: int = 5) -> List[Dict[str, str]]:
+def _ddg_news_search(query: str, limit: int = 10) -> List[Dict[str, str]]:
     try:
         out: List[Dict[str, str]] = []
         with DDGS() as ddgs:
-            for item in ddgs.text(query, max_results=limit):
+            for item in ddgs.news(query, max_results=limit):
                 out.append(
                     {
                         "title": item.get("title", ""),
                         "snippet": item.get("body", ""),
                         "url": item.get("href", ""),
-                        "source": "DuckDuckGo",
+                        "source": item.get("source", "DuckDuckGo"),
+                        "date": item.get("date", ""),
                     }
                 )
         return out
@@ -92,79 +92,20 @@ def _ddg_search(query: str, limit: int = 5) -> List[Dict[str, str]]:
         return []
 
 
-def _perplexity_search(cfg: Dict[str, Any], query: str) -> List[Dict[str, str]]:
-    search_cfg = cfg.get("search", {})
-    api_key = _normalize_secret(search_cfg.get("perplexity_api_key"))
-    model = search_cfg.get("perplexity_model", "sonar")
-    if not api_key:
-        return []
-
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": "你是研究助理，回覆重點並盡量附上來源。"},
-            {"role": "user", "content": f"整理以下主題的最新重點，列點輸出：{query}"},
-        ],
-        "temperature": 0.0,
-    }
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-
-    try:
-        resp = requests.post("https://api.perplexity.ai/chat/completions", json=payload, headers=headers, timeout=45)
-        data = resp.json() if resp.content else {}
-        if resp.status_code >= 400:
-            return []
-        content = data.get("choices", [{}])[0].get("message", {}).get("content", "") if isinstance(data, dict) else ""
-        if not content:
-            return []
-        return [{"title": "Perplexity 摘要", "snippet": content, "url": "", "source": "Perplexity"}]
-    except Exception:
-        return []
-
-
-def _tokenize(text: str) -> set[str]:
-    return set(re.findall(r"[\u4e00-\u9fffA-Za-z0-9]+", str(text).lower()))
-
-
-def _simple_rag(query: str, documents: List[Dict[str, str]], top_k: int = 5) -> List[Dict[str, str]]:
-    q_tokens = _tokenize(query)
-    scored: List[Tuple[int, Dict[str, str]]] = []
-    for doc in documents:
-        d_tokens = _tokenize(f"{doc.get('title', '')} {doc.get('snippet', '')}")
-        score = len(q_tokens & d_tokens)
-        scored.append((score, doc))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [d for s, d in scored[:top_k] if s > 0] or documents[:top_k]
-
-
-def _collect_external_context(cfg: Dict[str, Any], stock_label: str, sid: str) -> Tuple[str, List[str]]:
+def _collect_external_context(stock_label: str, sid: str) -> Tuple[str, List[str]]:
     warnings: List[str] = []
-    queries = [
-        f"{stock_label} {sid} 法說會 財報 展望",
-        f"{stock_label} {sid} 分點 籌碼",
-        f"{stock_label} {sid} 產業 景氣 上游 下游",
-    ]
-    docs: List[Dict[str, str]] = []
-    for q in queries:
-        docs.extend(_ddg_search(q, limit=4))
-
+    docs = _ddg_news_search(f"{stock_label} {sid} 最新新聞", limit=10)
     if not docs:
-        warnings.append("外部搜尋未取得結果（DDG）。")
+        warnings.append("新聞搜尋未取得結果（DuckDuckGo News）。")
 
-    # Optional search-LLM as an additional source
-    px_docs = _perplexity_search(cfg, f"{stock_label} {sid} 最新消息與風險")
-    if px_docs:
-        docs.extend(px_docs)
-    else:
-        warnings.append("Perplexity 未啟用或無回傳，已略過。")
-
-    rag_docs = _simple_rag(f"{stock_label} {sid} 基本面 分點 籌碼 預測", docs, top_k=8)
     lines = []
-    for i, d in enumerate(rag_docs, start=1):
+    for i, d in enumerate(docs[:10], start=1):
         title = d.get("title", "")
         snippet = d.get("snippet", "")
         url = d.get("url", "")
-        lines.append(f"[{i}] {title}\n{snippet}\n來源: {url}")
+        source = d.get("source", "")
+        date = d.get("date", "")
+        lines.append(f"[{i}] {title}\n{snippet}\n來源: {source} {date}\n連結: {url}")
 
     return "\n\n".join(lines), warnings
 
@@ -409,8 +350,7 @@ def show_fundamental_analysis():
     start_d, end_d = pd.to_datetime(date_range[0]).date(), pd.to_datetime(date_range[1]).date()
 
     st.caption(
-        "模型策略：基本面/預測使用較強推理 LLM；分點/籌碼優先結構化資料計算；"
-        "外部消息使用搜尋引擎 +（可選）Perplexity，再經簡易 RAG 節選。"
+        "外部消息來源已改為：僅搜尋目前標的最新 10 條新聞（DuckDuckGo News）。"
     )
     st.info(
         f"LLM Key: {_mask_secret(cfg.get('llm', {}).get('api_key'))} | "
@@ -421,7 +361,7 @@ def show_fundamental_analysis():
 
     if run:
         with st.spinner("蒐集資料與建模中..."):
-            context, warnings = _collect_external_context(cfg, selected_label, sid)
+            context, warnings = _collect_external_context(selected_label, sid)
             for w in warnings:
                 st.warning(w)
 
