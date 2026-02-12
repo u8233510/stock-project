@@ -458,7 +458,7 @@ def _apply_rag_rerank(stock_name, sid, records, cfg):
 def _build_external_context(stock_name, sid, cfg):
     """蒐集外部資訊（可配置付費/免費來源 + 社群網站搜尋）。"""
     search_cfg = cfg.get("search", {})
-    preferred_provider = str(search_cfg.get("provider", "openrouter_then_rss")).lower().strip()
+    preferred_provider = str(search_cfg.get("provider", "rss_then_wiki")).lower().strip()
 
     records = []
     warnings = []
@@ -479,7 +479,7 @@ def _build_external_context(stock_name, sid, cfg):
                 records.extend(or_records)
                 if or_records:
                     _external_cache_set(cache_key, or_records)
-                if or_warn:
+                if or_warn and "未設定 openrouter_api_key" not in str(or_warn):
                     warnings.append(f"[{tag}] {or_warn}")
             openrouter_queries_used += 1
         elif preferred_provider == "perplexity":
@@ -506,8 +506,6 @@ def _build_external_context(stock_name, sid, cfg):
 
     wiki_records, wiki_warn = _wikipedia_summary_search(stock_name, sid)
     records.extend(wiki_records)
-    if wiki_warn:
-        warnings.append(wiki_warn)
 
     # 社群/輿情（可選，避免 DDG 品質差時引入噪音）
     if use_ddg:
@@ -540,13 +538,7 @@ def _build_external_context(stock_name, sid, cfg):
         tier_counts[tier] = tier_counts.get(tier, 0) + 1
     summary = "、".join([f"{k}:{v}" for k, v in source_counts.items()])
     tier_summary = "、".join([f"{k}:{v}" for k, v in tier_counts.items() if v > 0])
-    warnings.insert(0, f"外部來源抓取成功（{summary}；來源分級 {tier_summary}）。已停用 Google Custom Search JSON API，改採 OpenRouter + Google News RSS/Wikipedia。")
-
-    mapping_info = _resolve_us_mapping(sid, stock_name)
-    if mapping_info["mapping_type"] == "direct_adr":
-        warnings.insert(1, f"美股對應：{sid} → {mapping_info['ticker']}（direct_adr, confidence={mapping_info['confidence']:.2f}）")
-    else:
-        warnings.insert(1, f"美股對應：目前無白名單 ADR 對應（{sid}），後續可由外部結構化來源補強。")
+    warnings.insert(0, f"外部來源抓取成功（{summary}；來源分級 {tier_summary}）。目前使用 Google News RSS / Wikipedia（可依設定切換其他來源）。")
 
     lines = []
     for rec in records[:24]:
@@ -651,7 +643,7 @@ def _build_free_fundamental_report(stock_name, sid, search_ctx, metrics):
 
     ext_note = "未取得外部新聞摘要。"
     if search_ctx:
-        ext_note = "已納入 OpenRouter / RSS / Wikipedia 等外部摘要，並交叉對照資料庫數據。"
+        ext_note = "已納入 RSS / Wikipedia 等外部摘要，並交叉對照資料庫數據。"
 
     data_quality_level, data_quality_ratio = _compute_data_quality(metrics)
 
