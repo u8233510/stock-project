@@ -143,6 +143,33 @@ def _news_sort_key(item: dict) -> float:
         pass
     return 0.0
 
+def _parse_relative_date(text: str):
+    now = datetime.now(timezone.utc)
+    raw = str(text).strip().lower()
+
+    m = re.search(r"(\d+)\s*(minute|minutes|min|mins)\s*ago", raw)
+    if m:
+        return now - timedelta(minutes=int(m.group(1)))
+
+    m = re.search(r"(\d+)\s*(hour|hours|hr|hrs)\s*ago", raw)
+    if m:
+        return now - timedelta(hours=int(m.group(1)))
+
+    m = re.search(r"(\d+)\s*(day|days)\s*ago", raw)
+    if m:
+        return now - timedelta(days=int(m.group(1)))
+
+    m = re.search(r"(\d+)\s*(week|weeks)\s*ago", raw)
+    if m:
+        return now - timedelta(weeks=int(m.group(1)))
+
+    m = re.search(r"(\d+)\s*分鐘前", raw)
+    if m:
+        return now - timedelta(minutes=int(m.group(1)))
+
+    m = re.search(r"(\d+)\s*小時前", raw)
+    if m:
+        return now - timedelta(hours=int(m.group(1)))
 
 def _build_queries(sid: str, sname: str) -> list[str]:
     return [
@@ -152,6 +179,9 @@ def _build_queries(sid: str, sname: str) -> list[str]:
         f"{sid} 股票 新聞",
     ]
 
+    m = re.search(r"(\d+)\s*週前", raw)
+    if m:
+        return now - timedelta(weeks=int(m.group(1)))
 
 def _fetch_dgs_news(sid: str, sname: str, timelimit: str = "y") -> list[dict]:
     queries = _build_queries(sid, sname)
@@ -211,6 +241,65 @@ def _fetch_serper_news(sid: str, sname: str, api_key: str) -> list[dict]:
 
     return sorted(normalized, key=_news_sort_key, reverse=True)[:10]
 
+def _parse_news_date(date_str: str):
+    if not date_str:
+        return datetime.min
+
+def _fetch_dgs_news(sid: str, sname: str, timelimit: str = "y") -> list[dict]:
+    queries = _build_queries(sid, sname)
+    news_list: list[dict[str, Any]] = []
+
+    with DDGS() as ddgs:
+        best_fallback = []
+        for query in queries:
+            fetched = _search_news(ddgs, query, timelimit)
+            if fetched and not best_fallback:
+                best_fallback = fetched
+
+            relevant = [n for n in fetched if _is_relevant_news(n, sid, sname)]
+            if relevant:
+                news_list = relevant
+                break
+
+        if not news_list:
+            news_list = best_fallback
+
+    return sorted(
+        news_list,
+        key=lambda n: _parse_news_date(str(n.get("date", ""))),
+        reverse=True,
+    )[:10]
+
+
+def _fetch_serper_news(sid: str, sname: str, api_key: str) -> list[dict]:
+    queries = _build_queries(sid, sname)
+    headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
+
+    best_fallback: list[dict[str, Any]] = []
+    for query in queries:
+        payload = {"q": query, "num": 10, "gl": "tw", "hl": "zh-tw", "tbs": "qdr:y"}
+        resp = requests.post("https://google.serper.dev/news", headers=headers, json=payload, timeout=20)
+        resp.raise_for_status()
+        data = resp.json() if resp.content else {}
+        fetched = data.get("news", []) if isinstance(data, dict) else []
+        if fetched and not best_fallback:
+            best_fallback = fetched
+
+        relevant = [n for n in fetched if _is_relevant_news(n, sid, sname)]
+        if relevant:
+            best_fallback = relevant
+            break
+
+    normalized = [
+        {
+            "title": item.get("title", ""),
+            "body": item.get("snippet", "") or item.get("body", ""),
+            "url": item.get("link", "") or item.get("url", ""),
+            "source": item.get("source", "SERPER"),
+            "date": item.get("date", ""),
+        }
+        for item in best_fallback
+    ]
 
 def _render_news_list(news_list: list[dict], source_label: str):
     if not news_list:
