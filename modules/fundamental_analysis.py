@@ -41,21 +41,6 @@ def _normalize_secret(value):
     return str(value).replace("﻿", "").strip()
 
 
-def _google_error_hint(err_msg):
-    """將 Google API 常見錯誤轉成可操作建議。"""
-    msg = (err_msg or "").lower()
-    if "api key not valid" in msg or "invalid" in msg:
-        return "請確認：1) API key 屬於同一個 GCP 專案；2) 已啟用 Custom Search JSON API；3) key 沒有被 HTTP referrer/IP 限制擋住此執行環境。"
-    if "referer" in msg or "ip" in msg or "not allowed" in msg:
-        return "此金鑰限制不符（HTTP referrer/IP）。若在本機 Python 後端呼叫，請移除 referrer 限制或改用允許該來源的金鑰。"
-    if "quota" in msg or "rate limit" in msg:
-        return "已達配額上限，請檢查 GCP Quotas/計費設定。"
-    if "access not configured" in msg or "has not been used" in msg:
-        return "尚未啟用 Custom Search JSON API，請到 Google Cloud Console 啟用後再試。"
-    return "請檢查 API key 是否正確、Custom Search JSON API 是否啟用、以及 key 限制是否允許目前執行環境。"
-
-
-
 def _mask_secret(value, keep=4):
     """遮罩敏感資訊，避免完整金鑰外露。"""
     val = _normalize_secret(value)
@@ -65,30 +50,6 @@ def _mask_secret(value, keep=4):
         return "*" * len(val)
     return f"{'*' * (len(val) - keep)}{val[-keep:]}"
 
-
-def _google_connectivity_check(cfg):
-    """快速檢查 Google CSE API 是否可由目前環境成功呼叫。"""
-    search_cfg = cfg.get("search", {})
-    api_key = _normalize_secret(search_cfg.get("google_api_key"))
-    cse_id = _normalize_secret(search_cfg.get("google_cse_id"))
-    if not api_key or not cse_id:
-        return False, "Google 檢查失敗：google_api_key 或 google_cse_id 未設定。"
-
-    try:
-        resp = requests.get(
-            "https://www.googleapis.com/customsearch/v1",
-            params={"key": api_key, "cx": cse_id, "q": "台股", "num": 1, "hl": "zh-TW"},
-            timeout=20,
-        )
-        data = resp.json()
-        if resp.status_code >= 400:
-            err_msg = data.get("error", {}).get("message", f"HTTP {resp.status_code}") if isinstance(data, dict) else f"HTTP {resp.status_code}"
-            return False, f"Google 連線檢查失敗：{err_msg}｜建議：{_google_error_hint(err_msg)}"
-
-        total = data.get("searchInformation", {}).get("totalResults", "?") if isinstance(data, dict) else "?"
-        return True, f"Google 連線檢查成功：API 可用（totalResults={total}）。"
-    except Exception as exc:
-        return False, f"Google 連線檢查例外：{str(exc)}"
 
 PUTER_JS_SNIPPET = """<script src="https://js.puter.com/v2/"></script>
 <script>
@@ -108,18 +69,8 @@ runPuterDemo();
 """
 
 
-def _get_google_quota_state():
-    """在 Streamlit session 內追蹤每日 Google CSE 呼叫數（不使用 Search Console）。"""
-    state = st.session_state.setdefault("google_cse_quota", {"day": "", "count": 0})
-    today = pd.Timestamp.now(tz="Asia/Taipei").strftime("%Y-%m-%d")
-    if state.get("day") != today:
-        state["day"] = today
-        state["count"] = 0
-    return state
-
-
-def _google_cache_get(query, max_age_minutes=120):
-    cache = st.session_state.setdefault("google_cse_cache", {})
+def _external_cache_get(query, max_age_minutes=120):
+    cache = st.session_state.setdefault("external_search_cache", {})
     item = cache.get(query)
     if not item:
         return None
@@ -129,8 +80,8 @@ def _google_cache_get(query, max_age_minutes=120):
     return item.get("records", [])
 
 
-def _google_cache_set(query, records):
-    cache = st.session_state.setdefault("google_cse_cache", {})
+def _external_cache_set(query, records):
+    cache = st.session_state.setdefault("external_search_cache", {})
     cache[query] = {"ts": pd.Timestamp.utcnow().timestamp(), "records": records}
 
 
@@ -191,61 +142,6 @@ def _wikipedia_summary_search(stock_name, sid):
         except Exception:
             continue
     return [], "Wikipedia 摘要無結果。"
-
-
-def _google_search(query, cfg, max_results=5):
-    """透過 Google Custom Search 取得搜尋摘要（僅用 JSON API，不用標準搜尋元素/Search Console）。"""
-    search_cfg = cfg.get("search", {})
-    api_key = _normalize_secret(search_cfg.get("google_api_key"))
-    cse_id = _normalize_secret(search_cfg.get("google_cse_id"))
-    if not api_key or not cse_id:
-        return [], "Google 未設定 google_api_key 或 google_cse_id。"
-
-    cached = _google_cache_get(query)
-    if cached is not None:
-        return cached, None
-
-    quota_state = _get_google_quota_state()
-    daily_free_limit = int(search_cfg.get("google_daily_free_limit", 100) or 100)
-    if quota_state.get("count", 0) >= daily_free_limit:
-        return [], f"Google 免費額度保護：今日已達 {daily_free_limit} 次上限，改用 RSS/Wikipedia 補強。"
-
-    try:
-        resp = requests.get(
-            "https://www.googleapis.com/customsearch/v1",
-            params={
-                "key": api_key,
-                "cx": cse_id,
-                "q": query,
-                "num": min(max_results, 10),
-                "hl": "zh-TW"
-            },
-            timeout=20,
-        )
-        quota_state["count"] = quota_state.get("count", 0) + 1
-        data = resp.json()
-        if resp.status_code >= 400:
-            err_msg = data.get("error", {}).get("message", f"HTTP {resp.status_code}") if isinstance(data, dict) else f"HTTP {resp.status_code}"
-            hint = _google_error_hint(err_msg)
-            return [], f"Google 搜尋失敗：{err_msg}｜建議：{hint}"
-
-        items = data.get("items", []) if isinstance(data, dict) else []
-        records = [
-            {
-                "source": "Google",
-                "title": i.get("title", ""),
-                "snippet": i.get("snippet", ""),
-                "url": i.get("link", ""),
-                "tier": _classify_source_tier(i.get("link", "")),
-            }
-            for i in items
-        ]
-        if not records:
-            return [], "Google 已連線，但此查詢無結果。"
-        _google_cache_set(query, records)
-        return records, None
-    except Exception as exc:
-        return [], f"Google 搜尋例外：{str(exc)}"
 
 
 def _perplexity_search(query, cfg):
@@ -383,6 +279,14 @@ def _openrouter_search(query, cfg):
     except Exception as exc:
         return [], f"OpenRouter 搜尋例外：{str(exc)}"
 
+
+def _openrouter_connectivity_check(cfg):
+    """快速檢查 OpenRouter 是否可由目前環境成功呼叫。"""
+    records, warning = _openrouter_search("台股 今日重點新聞", cfg)
+    if warning:
+        return False, warning
+    return bool(records), "OpenRouter 連線檢查成功。"
+
 def _ddg_search(query, max_results=5, source="DuckDuckGo"):
     try:
         with DDGS() as ddgs:
@@ -462,33 +366,35 @@ def _dedup_records(records):
 def _build_external_context(stock_name, sid, cfg):
     """蒐集外部資訊（可配置付費/免費來源 + 社群網站搜尋）。"""
     search_cfg = cfg.get("search", {})
-    preferred_provider = str(search_cfg.get("provider", "google_then_rss")).lower().strip()
+    preferred_provider = str(search_cfg.get("provider", "openrouter_then_rss")).lower().strip()
 
     records = []
     warnings = []
     topic_queries = _build_search_queries(stock_name, sid)
 
-    google_queries_used = 0
-    google_query_budget = int(search_cfg.get("google_queries_per_run", 2) or 2)
+    openrouter_queries_used = 0
+    openrouter_query_budget = int(search_cfg.get("openrouter_queries_per_run", 2) or 2)
     use_ddg = str(search_cfg.get("enable_ddg", "false")).lower() == "true"
 
     for query, tag in topic_queries:
-        if preferred_provider in {"google", "google_then_rss", "google_then_ddg"} and google_queries_used < google_query_budget:
-            google_records, google_warn = _google_search(query, cfg, max_results=3)
-            records.extend(google_records)
-            google_queries_used += 1
-            if google_warn:
-                warnings.append(f"[{tag}] {google_warn}")
+        if preferred_provider in {"openrouter", "openrouter_then_rss", "openrouter_then_ddg"} and openrouter_queries_used < openrouter_query_budget:
+            cache_key = f"or::{query}"
+            cached = _external_cache_get(cache_key)
+            if cached is not None:
+                records.extend(cached)
+            else:
+                or_records, or_warn = _openrouter_search(query, cfg)
+                records.extend(or_records)
+                if or_records:
+                    _external_cache_set(cache_key, or_records)
+                if or_warn:
+                    warnings.append(f"[{tag}] {or_warn}")
+            openrouter_queries_used += 1
         elif preferred_provider == "perplexity":
             pplx_records, pplx_warn = _perplexity_search(query, cfg)
             records.extend(pplx_records)
             if pplx_warn:
                 warnings.append(f"[{tag}] {pplx_warn}")
-        elif preferred_provider == "openrouter":
-            or_records, or_warn = _openrouter_search(query, cfg)
-            records.extend(or_records)
-            if or_warn:
-                warnings.append(f"[{tag}] {or_warn}")
         elif preferred_provider == "puter":
             put_records, put_warn = _puter_search(query, cfg)
             records.extend(put_records)
@@ -500,7 +406,7 @@ def _build_external_context(stock_name, sid, cfg):
         if rss_warn:
             warnings.append(f"[{tag}] {rss_warn}")
 
-        if use_ddg or preferred_provider == "google_then_ddg":
+        if use_ddg or preferred_provider == "openrouter_then_ddg":
             ddg_records, ddg_warn = _ddg_search(query, max_results=2, source=f"DuckDuckGo/{tag}")
             records.extend(ddg_records)
             if ddg_warn:
@@ -538,7 +444,7 @@ def _build_external_context(stock_name, sid, cfg):
         tier_counts[tier] = tier_counts.get(tier, 0) + 1
     summary = "、".join([f"{k}:{v}" for k, v in source_counts.items()])
     tier_summary = "、".join([f"{k}:{v}" for k, v in tier_counts.items() if v > 0])
-    warnings.insert(0, f"外部來源抓取成功（{summary}；來源分級 {tier_summary}）。Google 僅使用 Custom Search JSON API，並以 Google News RSS/Wikipedia 補強。")
+    warnings.insert(0, f"外部來源抓取成功（{summary}；來源分級 {tier_summary}）。已停用 Google Custom Search JSON API，改採 OpenRouter + Google News RSS/Wikipedia。")
 
     mapping_info = _resolve_us_mapping(sid, stock_name)
     if mapping_info["mapping_type"] == "direct_adr":
@@ -649,7 +555,7 @@ def _build_free_fundamental_report(stock_name, sid, search_ctx, metrics):
 
     ext_note = "未取得外部新聞摘要。"
     if search_ctx:
-        ext_note = "已納入 DuckDuckGo 與社群公開頁面摘要（免費來源）。"
+        ext_note = "已納入 OpenRouter / RSS / Wikipedia 等外部摘要，並交叉對照資料庫數據。"
 
     data_quality_level, data_quality_ratio = _compute_data_quality(metrics)
 
@@ -660,6 +566,7 @@ def _build_free_fundamental_report(stock_name, sid, search_ctx, metrics):
 ## 財務分析
 目前觀察到 EPS 趨勢為「{eps_trend}」，整體財務動能判讀為「{_free_score_label(score)}」。
 {ext_note}
+分析重點以「獲利連續性（EPS）＋成長方向（營收）＋資產品質（ROE/ROA/現金流）」三軸交叉判讀。
 
 ### 財務指標
 - EPS：{_fmt_metric(metrics.get('latest_eps'))}
@@ -681,8 +588,8 @@ def _build_free_fundamental_report(stock_name, sid, search_ctx, metrics):
 
 ## 投資評價
 - 短期評價：{_free_score_label(score)}（以營收與 EPS 最新變化為主）
-- 中期評價：中性偏基本面驗證（需追蹤連續 2~3 季）
-- 長期評價：取決於產品競爭力、資本支出效率與景氣循環位置
+- 中期評價：中性偏基本面驗證（需追蹤連續 2~3 季 EPS 與營收是否同向）
+- 長期評價：取決於產品競爭力、資本支出效率、自由現金流與景氣循環位置
 - 目標價格：資料不足（免費版不產生目標價）
 
 ## 風險評估
@@ -691,7 +598,7 @@ def _build_free_fundamental_report(stock_name, sid, search_ctx, metrics):
 - 法規/政策風險：需留意產業政策、出口管制與會計準則變動
 
 ## 結論
-本次為「免費版 AI 基本面分析」，以可驗證數據做規則化摘要；若啟用 LLM 可再進一步做脈絡整合。
+本次為「強化版免費 AI 基本面分析」，以可驗證數據做規則化摘要；若啟用 LLM 可再進一步做脈絡整合。
 目前資料完整度評估：{data_quality_level}（{data_quality_ratio:.0%}）。
 建議後續持續追蹤：EPS 連續性、營收年增率轉折、現金流品質，以及重大新聞事件對訂單與毛利率的影響。
 """.strip()
@@ -897,7 +804,7 @@ def show_fundamental_analysis():
         if llm_available:
             st.success(f"✅ 已偵測到 llm.api_key（{_mask_secret(llm_cfg.get('api_key'))}），可直接使用 {model_name} 進行強化分析。")
         st.info("💡 改善建議：系統會先做多查詢聯網蒐集，再交給 LLM 整合；效果會比只靠模型記憶好。")
-        st.caption("若你有 OpenRouter/Puter key，可在 config search.provider 設為 'openrouter' 或 'puter'，並設定對應 api_key。")
+        st.caption("已停用 Google Custom Search JSON API。建議在 config 設定 search.provider='openrouter_then_rss' 並填入 openrouter_api_key。")
 
         run_btn_label = "🚀 啟動 AI 基本面分析（LLM 強化）" if use_llm else "🚀 啟動 AI 基本面分析（免費規則化）"
         # ✅ 保留聯網搜尋邏輯
