@@ -287,13 +287,18 @@ def _summarize_news(cfg: dict, sid: str, sname: str, source_label: str, news_lis
 
 
 def _render_summary_button(cfg: dict, sid: str, sname: str, source_label: str, news_list: list[dict], key: str):
+    summary_state_key = f"fundamental_summary_{source_label.lower()}_{sid}"
+
     if st.button(f"🧠 總結 {source_label} 新聞", use_container_width=True, key=key):
         with st.spinner(f"正在整理 {source_label} 新聞重點..."):
             try:
-                summary = _summarize_news(cfg, sid, sname, source_label, news_list)
-                st.markdown(summary)
+                st.session_state[summary_state_key] = _summarize_news(cfg, sid, sname, source_label, news_list)
             except Exception as e:
                 st.error(f"{source_label} 新聞總結失敗：{str(e)}")
+
+    summary_text = st.session_state.get(summary_state_key, "")
+    if summary_text:
+        st.markdown(summary_text)
 
 
 def render_stock_news(sid: str, sname: str, cfg: dict | None = None, serper_api_key: str | None = None):
@@ -307,8 +312,8 @@ def render_stock_news(sid: str, sname: str, cfg: dict | None = None, serper_api_
         try:
             with st.spinner("DGS 正在搜尋最新動態..."):
                 dgs_news = _fetch_dgs_news(sid, sname, timelimit="y")
-            _render_news_list(dgs_news, "DGS")
             _render_summary_button(cfg, sid, sname, "DGS", dgs_news, key=f"sum_dgs_{sid}")
+            _render_news_list(dgs_news, "DGS")
         except Exception as e:
             st.error(f"DGS 搜尋新聞時發生錯誤：{str(e)}")
 
@@ -319,8 +324,8 @@ def render_stock_news(sid: str, sname: str, cfg: dict | None = None, serper_api_
         try:
             with st.spinner("SERPER 正在搜尋最新動態..."):
                 serper_news = _fetch_serper_news(sid, sname, serper_api_key)
-            _render_news_list(serper_news, "SERPER")
             _render_summary_button(cfg, sid, sname, "SERPER", serper_news, key=f"sum_serper_{sid}")
+            _render_news_list(serper_news, "SERPER")
         except Exception as e:
             st.error(f"SERPER 搜尋新聞時發生錯誤：{str(e)}")
 
@@ -340,8 +345,16 @@ def show_fundamental_analysis():
     sid, sname = stock_options[selected_label]
     serper_api_key = cfg.get("search", {}).get("serper_api_key", "")
 
+    if "fundamental_selected_stock" not in st.session_state:
+        st.session_state["fundamental_selected_stock"] = None
+
     if st.button("🔍 搜尋最新新聞", use_container_width=True):
-        render_stock_news(sid, sname, cfg=cfg, serper_api_key=serper_api_key)
+        st.session_state["fundamental_selected_stock"] = (sid, sname)
+
+    selected_stock = st.session_state.get("fundamental_selected_stock")
+    if selected_stock:
+        selected_sid, selected_sname = selected_stock
+        render_stock_news(selected_sid, selected_sname, cfg=cfg, serper_api_key=serper_api_key)
 
 
 if __name__ == "__main__":
