@@ -5,8 +5,8 @@ import pandas as pd
 from FinMind.data import DataLoader
 
 import database
-from weighted_cost_utils import compute_interval_metrics
-from branch_weighted_cost_helpers import rebuild_latest_branch_weighted_cost
+from utility.weighted_cost_utils import compute_interval_metrics
+from utility.branch_weighted_cost_helpers import rebuild_latest_branch_weighted_cost
 
 
 def _ensure_data_ingest_log_table(conn):
