@@ -52,6 +52,36 @@ def _is_relevant_news(item: dict, sid: str, sname: str) -> bool:
     return bool(sid_hit or name_hit)
 
 
+
+
+def _parse_news_date(date_str: str):
+    if not date_str:
+        return datetime.min
+
+    txt = str(date_str).strip()
+    normalized = txt.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalized)
+    except Exception:
+        pass
+
+    fmts = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+        "%Y/%m/%d",
+    ]
+    for fmt in fmts:
+        try:
+            return datetime.strptime(txt, fmt)
+        except Exception:
+            continue
+
+    return datetime.min
+
+
 def render_stock_news(sid: str, sname: str):
     """
     主要渲染函數：搜尋並顯示指定股票的最新 10 則新聞
@@ -90,7 +120,13 @@ def render_stock_news(sid: str, sname: str):
                 if not news_list:
                     news_list = best_fallback
 
-        # 3. 呈現搜尋結果
+        # 3. 依日期由新到舊排序，再呈現搜尋結果
+        news_list = sorted(
+            news_list,
+            key=lambda n: _parse_news_date(str(n.get("date", ""))),
+            reverse=True,
+        )
+
         if not news_list:
             st.warning("目前找不到相關新聞（已嘗試多組關鍵字與近一年範圍），請稍後再試。")
             return
@@ -108,8 +144,11 @@ def render_stock_news(sid: str, sname: str):
                     if date_str:
                         try:
                             # 簡化日期格式
-                            dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-                            st.caption(f"📅 {dt.strftime('%m/%d %H:%M')}")
+                            dt = _parse_news_date(date_str)
+                            if dt != datetime.min:
+                                st.caption(f"📅 {dt.strftime('%m/%d %H:%M')}")
+                            else:
+                                st.caption(date_str)
                         except Exception:
                             st.caption(date_str)
                     st.info(f"📍 {source}")
