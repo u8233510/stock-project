@@ -32,8 +32,12 @@ TRUSTED_SOURCE_PATTERNS = {
 TW_US_ADR_MAPPING = {
     "2330": "TSM",  # 台積電
     "2303": "UMC",  # 聯電
+    "2233": "2233.TW",  # 宇隆（先用台股代碼）
 }
 
+INDUSTRY_PROXY_KEYWORDS = {
+    "default": ["半導體", "電子零組件", "工業製造"],
+}
 
 
 def _normalize_secret(value):
@@ -342,15 +346,132 @@ def _resolve_us_mapping(stock_id, stock_name):
     }
 
 
+def _industry_keywords(stock_name):
+    """回傳產業代理關鍵字（先以通用詞為主，可後續擴充成資料表映射）。"""
+    _ = stock_name
+    return INDUSTRY_PROXY_KEYWORDS.get("default", [])
+
+
+def _build_macro_and_peer_queries(stock_name, sid):
+    """補充同產業、上游景氣與美股鏈結查詢。"""
+    adr = _resolve_us_mapping(sid, stock_name).get("ticker", "")
+    industry_terms = " ".join(_industry_keywords(stock_name))
+
+    queries = [
+        (f"{stock_name} {sid} 同產業 台股 近況 訂單", "同產業比較"),
+        (f"{industry_terms} 台灣 產業新聞 景氣 循環", "產業景氣"),
+        (f"美股 {industry_terms} 指數 財報 展望", "美股產業鏈"),
+    ]
+    if adr:
+        queries.append((f"{adr} earnings guidance margin demand", "對應美股/ADR"))
+    return queries
+
+
+def _row_pick_first(row, keys):
+    for k in keys:
+        if k in row and str(row.get(k)).strip() not in {"", "--", "N/A", "nan"}:
+            return row.get(k)
+    return None
+
+
+def _fetch_twse_openapi_metrics(stock_id):
+    """公開觀測站/證交所開放資料 fallback（若可用則優先）。"""
+    sid = str(stock_id).strip()
+    endpoints = [
+        "https://openapi.twse.com.tw/v1/opendata/t187ap14_L",
+        "https://openapi.twse.com.tw/v1/opendata/t187ap05_L",
+        "https://openapi.twse.com.tw/v1/opendata/t187ap04_L",
+    ]
+
+    for url in endpoints:
+        try:
+            resp = requests.get(url, timeout=20)
+            if resp.status_code >= 400:
+                continue
+            data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else []
+            if not isinstance(data, list) or not data:
+                continue
+
+            row = None
+            for r in data:
+                if str(r.get("公司代號", "")).strip() == sid or str(r.get("SecuritiesCompanyCode", "")).strip() == sid:
+                    row = r
+                    break
+            if not isinstance(row, dict):
+                continue
+
+            metrics = {
+                "latest_eps": _row_pick_first(row, ["基本每股盈餘（元）", "每股盈餘", "EPS", "BasicEarningsPerShare"]),
+                "roe": _row_pick_first(row, ["權益報酬率(%)", "ROE(%)", "ROE"]),
+                "roa": _row_pick_first(row, ["資產報酬率(%)", "ROA(%)", "ROA"]),
+                "gross_margin": _row_pick_first(row, ["營業毛利率(%)", "毛利率(%)", "GrossMargin", "GrossMarginRate"]),
+                "operating_cf": _row_pick_first(row, ["營業活動之淨現金流入（流出）", "營業現金流量", "OperatingCashFlow"]),
+                "source": f"TWSE OpenAPI:{url.rsplit('/', 1)[-1]}",
+            }
+            if any(_to_float(v) is not None for k, v in metrics.items() if k != "source"):
+                return metrics, None
+        except Exception:
+            continue
+
+    return {}, "公開觀測站/證交所開放資料暫無可用欄位。"
+
+
+def _fetch_public_company_metrics(stock_id):
+    """公開資料 fallback：先試公開觀測站/證交所，再試 Yahoo Finance（免 key）。"""
+    sid = str(stock_id).strip()
+
+    twse_metrics, twse_warn = _fetch_twse_openapi_metrics(sid)
+    if twse_metrics:
+        return twse_metrics, twse_warn
+
+    tickers = [f"{sid}.TW", f"{sid}.TWO"]
+
+    for ticker in tickers:
+        try:
+            url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
+            params = {"modules": "financialData,defaultKeyStatistics"}
+            resp = requests.get(url, params=params, timeout=20)
+            if resp.status_code >= 400:
+                continue
+
+            data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+            result = (((data.get("quoteSummary") or {}).get("result") or [None])[0] or {}) if isinstance(data, dict) else {}
+            fin = result.get("financialData") or {}
+            stats = result.get("defaultKeyStatistics") or {}
+
+            def _raw(section, key):
+                obj = section.get(key)
+                if isinstance(obj, dict):
+                    return obj.get("raw")
+                return None
+
+            metrics = {
+                "latest_eps": _raw(stats, "trailingEps"),
+                "roe": (_raw(fin, "returnOnEquity") or 0) * 100 if _raw(fin, "returnOnEquity") is not None else None,
+                "roa": (_raw(fin, "returnOnAssets") or 0) * 100 if _raw(fin, "returnOnAssets") is not None else None,
+                "gross_margin": (_raw(fin, "grossMargins") or 0) * 100 if _raw(fin, "grossMargins") is not None else None,
+                "operating_cf": _raw(fin, "operatingCashflow"),
+                "source": f"Yahoo Finance:{ticker}",
+            }
+
+            if any(v is not None for k, v in metrics.items() if k != "source"):
+                return metrics, None
+        except Exception:
+            continue
+
+    return {}, f"{twse_warn or '公開觀測站來源不可用'}；Yahoo Finance fallback 亦無可用結果。"
+
+
 def _build_search_queries(stock_name, sid):
-    """建立多角度查詢，讓免費聯網摘要更接近可搜尋 LLM 的效果。"""
+    """建立多角度查詢，納入公司、同產業、以及美股產業鏈訊號。"""
     base = f"{stock_name} {sid}"
-    return [
+    core_queries = [
         (f"{base} 公司簡介 核心產品 產業地位", "公司定位"),
         (f"{base} 最新新聞 訂單 客戶", "最新動態"),
         (f"{base} 法說會 財測 資本支出 毛利率", "經營展望"),
         (f"{base} 風險 匯率 原物料 地緣政治", "風險事件"),
     ]
+    return core_queries + _build_macro_and_peer_queries(stock_name, sid)
 
 
 def _dedup_records(records):
@@ -538,7 +659,7 @@ def _build_external_context(stock_name, sid, cfg):
         tier_counts[tier] = tier_counts.get(tier, 0) + 1
     summary = "、".join([f"{k}:{v}" for k, v in source_counts.items()])
     tier_summary = "、".join([f"{k}:{v}" for k, v in tier_counts.items() if v > 0])
-    warnings.insert(0, f"外部來源抓取成功（{summary}；來源分級 {tier_summary}）。目前使用 Google News RSS / Wikipedia（可依設定切換其他來源）。")
+    warnings.insert(0, f"外部來源抓取成功（{summary}；來源分級 {tier_summary}）。目前使用 Google News RSS / Wikipedia + 同產業/美股產業鏈查詢（可依設定切換其他來源）。")
 
     lines = []
     for rec in records[:24]:
@@ -647,6 +768,32 @@ def _build_free_fundamental_report(stock_name, sid, search_ctx, metrics):
 
     data_quality_level, data_quality_ratio = _compute_data_quality(metrics)
 
+    # 更細緻的規則化判讀（避免只給方向、不給條件）
+    quality_flags = []
+    if latest_eps is not None:
+        quality_flags.append("EPS 為正" if latest_eps > 0 else "EPS 為負")
+    if latest_eps is not None and prev_eps is not None:
+        delta = latest_eps - prev_eps
+        quality_flags.append(f"單季 EPS 變動 {delta:+.2f}")
+    if revenue_growth is not None:
+        quality_flags.append(f"營收成長率 {revenue_growth:+.2f}%")
+
+    valuation_hint = "資料不足，暫不給估值區間。"
+    if latest_eps is not None and latest_eps > 0:
+        valuation_hint = (
+            "可用『EPS × 本益比』做情境估值：\n"
+            "- 保守情境：景氣下行或接單保守時，給較低本益比。\n"
+            "- 基準情境：營收止跌、EPS 持平成長時，給中位本益比。\n"
+            "- 樂觀情境：新品放量或產能利用率提升時，給偏高本益比。"
+        )
+
+    action_items = [
+        "追蹤未來 2~3 季 EPS 是否維持年增與季增的其中至少一項為正。",
+        "確認月營收是否出現連續 2 個月以上年增回正。",
+        "檢視營業現金流與淨利是否同步改善，避免『帳上獲利、現金未進』。",
+    ]
+    action_text = "\n- " + "\n- ".join(action_items)
+
     return f"""
 ## 公司簡介
 {stock_name}（{sid}）為台股上市櫃公司，本報告採用內部資料庫財報欄位與免費外部搜尋摘要進行整理。
@@ -655,6 +802,7 @@ def _build_free_fundamental_report(stock_name, sid, search_ctx, metrics):
 目前觀察到 EPS 趨勢為「{eps_trend}」，整體財務動能判讀為「{_free_score_label(score)}」。
 {ext_note}
 分析重點以「獲利連續性（EPS）＋成長方向（營收）＋資產品質（ROE/ROA/現金流）」三軸交叉判讀。
+目前訊號：{'；'.join(quality_flags) if quality_flags else '資料不足'}。
 
 ### 財務指標
 - EPS：{_fmt_metric(metrics.get('latest_eps'))}
@@ -678,7 +826,7 @@ def _build_free_fundamental_report(stock_name, sid, search_ctx, metrics):
 - 短期評價：{_free_score_label(score)}（以營收與 EPS 最新變化為主）
 - 中期評價：中性偏基本面驗證（需追蹤連續 2~3 季 EPS 與營收是否同向）
 - 長期評價：取決於產品競爭力、資本支出效率、自由現金流與景氣循環位置
-- 目標價格：資料不足（免費版不產生目標價）
+- 目標價格：{valuation_hint}
 
 ## 風險評估
 - 市場風險：受總體景氣、利率與資金面影響
@@ -688,7 +836,8 @@ def _build_free_fundamental_report(stock_name, sid, search_ctx, metrics):
 ## 結論
 本次為「強化版免費 AI 基本面分析」，以可驗證數據做規則化摘要；若啟用 LLM 可再進一步做脈絡整合。
 目前資料完整度評估：{data_quality_level}（{data_quality_ratio:.0%}）。
-建議後續持續追蹤：EPS 連續性、營收年增率轉折、現金流品質，以及重大新聞事件對訂單與毛利率的影響。
+建議後續持續追蹤：{action_text}
+另可搭配重大新聞事件追蹤訂單能見度與毛利率變化，以避免只看單季數字造成誤判。
 """.strip()
 
 
@@ -932,6 +1081,18 @@ def show_fundamental_analysis():
                     "gross_margin": _latest_metric_value(profit_raw, ["Gross Margin", "Gross Margin(%)", "毛利率"]),
                     "operating_cf": _latest_metric_value(profit_raw, ["Operating Cash Flow", "營業活動之淨現金流入（流出）", "營業現金流"]),
                 }
+
+                # 公開資料 fallback：當內部資料不足時補齊關鍵指標
+                missing_keys = [k for k in ["latest_eps", "roe", "roa", "gross_margin", "operating_cf"] if _to_float(metrics.get(k)) is None]
+                if missing_keys:
+                    public_metrics, public_warn = _fetch_public_company_metrics(sid)
+                    if public_warn:
+                        st.info(public_warn)
+                    if public_metrics:
+                        for k in missing_keys:
+                            if _to_float(metrics.get(k)) is None and public_metrics.get(k) is not None:
+                                metrics[k] = public_metrics[k]
+                        st.info(f"已使用公開資料補齊部分財務欄位（來源：{public_metrics.get('source', '公開來源')}）。")
 
                 if use_llm and llm_available:
                     cfg.setdefault("llm", {}).setdefault("models", {})["fundamental"] = model_name
