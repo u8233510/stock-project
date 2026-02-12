@@ -1,5 +1,8 @@
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+import re
+from typing import Any
 
+import requests
 import streamlit as st
 from ddgs import DDGS
 
@@ -36,13 +39,16 @@ def _search_news(ddgs: DDGS, query: str, timelimit: str) -> list[dict]:
 
 def _is_relevant_news(item: dict, sid: str, sname: str) -> bool:
     """以股票代碼/名稱做基礎相關性過濾，降低無關新聞。"""
-    text = " ".join([
-        str(item.get("title", "")),
-        str(item.get("body", "")),
-        str(item.get("snippet", "")),
-        str(item.get("url", "")),
-        str(item.get("href", "")),
-    ]).lower()
+    text = " ".join(
+        [
+            str(item.get("title", "")),
+            str(item.get("body", "")),
+            str(item.get("snippet", "")),
+            str(item.get("url", "")),
+            str(item.get("href", "")),
+            str(item.get("link", "")),
+        ]
+    ).lower()
 
     sid_txt = str(sid).strip().lower()
     sname_txt = str(sname).strip().lower()
@@ -52,16 +58,56 @@ def _is_relevant_news(item: dict, sid: str, sname: str) -> bool:
     return bool(sid_hit or name_hit)
 
 
+def _parse_relative_date(text: str):
+    now = datetime.now(timezone.utc)
+    raw = str(text).strip().lower()
+
+    m = re.search(r"(\d+)\s*(minute|minutes|min|mins)\s*ago", raw)
+    if m:
+        return now - timedelta(minutes=int(m.group(1)))
+
+    m = re.search(r"(\d+)\s*(hour|hours|hr|hrs)\s*ago", raw)
+    if m:
+        return now - timedelta(hours=int(m.group(1)))
+
+    m = re.search(r"(\d+)\s*(day|days)\s*ago", raw)
+    if m:
+        return now - timedelta(days=int(m.group(1)))
+
+    m = re.search(r"(\d+)\s*(week|weeks)\s*ago", raw)
+    if m:
+        return now - timedelta(weeks=int(m.group(1)))
+
+    m = re.search(r"(\d+)\s*分鐘前", raw)
+    if m:
+        return now - timedelta(minutes=int(m.group(1)))
+
+    m = re.search(r"(\d+)\s*小時前", raw)
+    if m:
+        return now - timedelta(hours=int(m.group(1)))
+
+    m = re.search(r"(\d+)\s*天前", raw)
+    if m:
+        return now - timedelta(days=int(m.group(1)))
+
+    m = re.search(r"(\d+)\s*週前", raw)
+    if m:
+        return now - timedelta(weeks=int(m.group(1)))
+
+    return None
 
 
 def _parse_news_date(date_str: str):
     if not date_str:
-        return datetime.min
+        return datetime.min.replace(tzinfo=timezone.utc)
 
     txt = str(date_str).strip()
     normalized = txt.replace("Z", "+00:00")
     try:
-        return datetime.fromisoformat(normalized)
+        dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except Exception:
         pass
 
@@ -72,103 +118,149 @@ def _parse_news_date(date_str: str):
         "%Y/%m/%d %H:%M:%S",
         "%Y/%m/%d %H:%M",
         "%Y/%m/%d",
+        "%b %d, %Y",
     ]
     for fmt in fmts:
         try:
-            return datetime.strptime(txt, fmt)
+            return datetime.strptime(txt, fmt).replace(tzinfo=timezone.utc)
         except Exception:
             continue
 
-    return datetime.min
+    rel = _parse_relative_date(txt)
+    if rel is not None:
+        return rel
+
+    return datetime.min.replace(tzinfo=timezone.utc)
 
 
-def render_stock_news(sid: str, sname: str):
-    """
-    主要渲染函數：搜尋並顯示指定股票的最新 10 則新聞
-    :param sid: 股票代碼 (例如: 2330)
-    :param sname: 股票名稱 (例如: 台積電)
-    """
-    st.subheader(f"🌐 {sname} ({sid}) 最新相關新聞")
-
-    # 1. 建立搜尋關鍵字（優先精準詞，降低無關結果）
-    queries = [
+def _build_queries(sid: str, sname: str) -> list[str]:
+    return [
         f"{sname} {sid} 台股 新聞",
         f"{sname} {sid} 股票 新聞",
         f"{sname} 股票 新聞",
         f"{sid} 股票 新聞",
     ]
 
-    # timelimit 直接使用「年」
-    timelimit = "y"
+def _parse_news_date(date_str: str):
+    if not date_str:
+        return datetime.min
 
-    try:
-        with st.spinner("正在從網路搜尋最新動態..."):
-            news_list = []
-            # 2. 使用 DuckDuckGo 進行新聞搜尋，並做股票名稱/代碼過濾
-            with DDGS() as ddgs:
-                best_fallback = []
-                for query in queries:
-                    fetched = _search_news(ddgs, query, timelimit)
-                    if fetched and not best_fallback:
-                        best_fallback = fetched
+def _fetch_dgs_news(sid: str, sname: str, timelimit: str = "y") -> list[dict]:
+    queries = _build_queries(sid, sname)
+    news_list: list[dict[str, Any]] = []
 
-                    relevant = [n for n in fetched if _is_relevant_news(n, sid, sname)]
-                    if relevant:
-                        news_list = relevant
-                        break
+    with DDGS() as ddgs:
+        best_fallback = []
+        for query in queries:
+            fetched = _search_news(ddgs, query, timelimit)
+            if fetched and not best_fallback:
+                best_fallback = fetched
 
-                if not news_list:
-                    news_list = best_fallback
-
-        # 3. 依日期由新到舊排序，再呈現搜尋結果
-        news_list = sorted(
-            news_list,
-            key=lambda n: _parse_news_date(str(n.get("date", ""))),
-            reverse=True,
-        )
+            relevant = [n for n in fetched if _is_relevant_news(n, sid, sname)]
+            if relevant:
+                news_list = relevant
+                break
 
         if not news_list:
-            st.warning("目前找不到相關新聞（已嘗試多組關鍵字與近一年範圍），請稍後再試。")
-            return
+            news_list = best_fallback
 
-        for news in news_list[:10]:
-            # 建立一個美觀的容器顯示每一則新聞
-            with st.container():
-                col1, col2 = st.columns([1, 4])
+    return sorted(
+        news_list,
+        key=lambda n: _parse_news_date(str(n.get("date", ""))),
+        reverse=True,
+    )[:10]
 
-                # 顯示來源與日期
-                with col1:
-                    source = news.get("source", "新聞來源")
-                    date_str = news.get("date", "")
-                    # 格式化日期顯示
-                    if date_str:
-                        try:
-                            # 簡化日期格式
-                            dt = _parse_news_date(date_str)
-                            if dt != datetime.min:
-                                st.caption(f"📅 {dt.strftime('%m/%d %H:%M')}")
-                            else:
-                                st.caption(date_str)
-                        except Exception:
-                            st.caption(date_str)
-                    st.info(f"📍 {source}")
 
-                # 顯示標題與連結
-                with col2:
-                    title = news.get("title", "(無標題)")
-                    url = news.get("url") or news.get("href", "")
-                    snippet = news.get("body", "點擊標題查看完整內容...")
-                    if url:
-                        st.markdown(f"#### [{title}]({url})")
+def _fetch_serper_news(sid: str, sname: str, api_key: str) -> list[dict]:
+    queries = _build_queries(sid, sname)
+    headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
+
+    best_fallback: list[dict[str, Any]] = []
+    for query in queries:
+        payload = {"q": query, "num": 10, "gl": "tw", "hl": "zh-tw", "tbs": "qdr:y"}
+        resp = requests.post("https://google.serper.dev/news", headers=headers, json=payload, timeout=20)
+        resp.raise_for_status()
+        data = resp.json() if resp.content else {}
+        fetched = data.get("news", []) if isinstance(data, dict) else []
+        if fetched and not best_fallback:
+            best_fallback = fetched
+
+        relevant = [n for n in fetched if _is_relevant_news(n, sid, sname)]
+        if relevant:
+            best_fallback = relevant
+            break
+
+    normalized = [
+        {
+            "title": item.get("title", ""),
+            "body": item.get("snippet", "") or item.get("body", ""),
+            "url": item.get("link", "") or item.get("url", ""),
+            "source": item.get("source", "SERPER"),
+            "date": item.get("date", ""),
+        }
+        for item in best_fallback
+    ]
+
+    return sorted(normalized, key=lambda n: _parse_news_date(str(n.get("date", ""))), reverse=True)[:10]
+
+
+def _render_news_list(news_list: list[dict], source_label: str):
+    if not news_list:
+        st.warning("目前找不到相關新聞（已嘗試多組關鍵字與近一年範圍），請稍後再試。")
+        return
+
+    for news in news_list[:10]:
+        with st.container():
+            col1, col2 = st.columns([1, 4])
+
+            with col1:
+                source = news.get("source", source_label)
+                date_str = news.get("date", "")
+                if date_str:
+                    dt = _parse_news_date(date_str)
+                    if dt != datetime.min.replace(tzinfo=timezone.utc):
+                        st.caption(f"📅 {dt.astimezone(timezone.utc).strftime('%m/%d %H:%M')}")
                     else:
-                        st.markdown(f"#### {title}")
-                    st.write(f"{snippet[:150]}...")
+                        st.caption(date_str)
+                st.info(f"📍 {source}")
 
-                st.divider()
+            with col2:
+                title = news.get("title", "(無標題)")
+                url = news.get("url") or news.get("href", "") or news.get("link", "")
+                snippet = news.get("body", "點擊標題查看完整內容...")
+                if url:
+                    st.markdown(f"#### [{title}]({url})")
+                else:
+                    st.markdown(f"#### {title}")
+                st.write(f"{snippet[:150]}...")
 
-    except Exception as e:
-        st.error(f"搜尋新聞時發生錯誤：{str(e)}")
-        st.info("建議檢查網路連線，或稍後再試。")
+            st.divider()
+
+
+def render_stock_news(sid: str, sname: str, serper_api_key: str | None = None):
+    """顯示 DGS 與 SERPER 兩種來源新聞（最新到最舊，最多 10 筆）。"""
+    st.subheader(f"🌐 {sname} ({sid}) 最新相關新聞")
+
+    tab_dgs, tab_serper = st.tabs(["DGS", "SERPER"])
+
+    with tab_dgs:
+        try:
+            with st.spinner("DGS 正在搜尋最新動態..."):
+                dgs_news = _fetch_dgs_news(sid, sname, timelimit="y")
+            _render_news_list(dgs_news, "DGS")
+        except Exception as e:
+            st.error(f"DGS 搜尋新聞時發生錯誤：{str(e)}")
+
+    with tab_serper:
+        if not serper_api_key:
+            st.warning("未設定 SERPER API Key（search.serper_api_key），此分頁無法查詢。")
+            return
+        try:
+            with st.spinner("SERPER 正在搜尋最新動態..."):
+                serper_news = _fetch_serper_news(sid, sname, serper_api_key)
+            _render_news_list(serper_news, "SERPER")
+        except Exception as e:
+            st.error(f"SERPER 搜尋新聞時發生錯誤：{str(e)}")
 
 
 def show_fundamental_analysis():
@@ -184,16 +276,12 @@ def show_fundamental_analysis():
     stock_options = {f"{s['stock_id']} {s['name']}": (s["stock_id"], s["name"]) for s in universe}
     selected_label = st.selectbox("選擇股票", list(stock_options.keys()))
     sid, sname = stock_options[selected_label]
+    serper_api_key = cfg.get("search", {}).get("serper_api_key", "")
 
     if st.button("🔍 搜尋最新新聞", use_container_width=True):
-        render_stock_news(sid, sname)
+        render_stock_news(sid, sname, serper_api_key=serper_api_key)
 
 
-# 如果此程式被當作主程式執行 (測試用)
 if __name__ == "__main__":
-    # 這裡的 sid 與 sname 通常由您的 app.py 選取後傳入
-    # 範例測試：
     st.set_page_config(page_title="股票新聞搜尋", layout="wide")
-    test_sid = "2330"
-    test_sname = "台積電"
-    render_stock_news(test_sid, test_sname)
+    render_stock_news("2233", "宇隆")
