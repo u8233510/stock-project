@@ -4,13 +4,14 @@ import database
 import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from modules.llm_model_selector import get_llm_model
 
 # 1. 核心 AI 呼叫工具
 def _call_nim(cfg, messages):
     llm_cfg = cfg.get("llm", {})
     url = "https://integrate.api.nvidia.com/v1/chat/completions"
     headers = {"Authorization": f"Bearer {llm_cfg.get('api_key')}", "Content-Type": "application/json"}
-    payload = {"model": llm_cfg.get("model"), "messages": messages, "temperature": 0.0, "max_tokens": 2000}
+    payload = {"model": get_llm_model(cfg, "chip"), "messages": messages, "temperature": 0.0, "max_tokens": 2000}
     resp = requests.post(url, headers=headers, json=payload, timeout=120)
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"]

@@ -3,6 +3,7 @@ import pandas as pd
 import database
 import requests
 import plotly.graph_objects as go
+from modules.llm_model_selector import get_llm_model
 
 def _call_nim_prediction(cfg, prompt):
     """ 呼叫 NVIDIA NIM 進行鏈式思考 (CoT) 預測 """
@@ -10,7 +11,7 @@ def _call_nim_prediction(cfg, prompt):
     url = "https://integrate.api.nvidia.com/v1/chat/completions"
     headers = {"Authorization": f"Bearer {llm_cfg.get('api_key')}", "Content-Type": "application/json"}
     payload = {
-        "model": llm_cfg.get("model"),
+        "model": get_llm_model(cfg, "prediction"),
         "messages": [
             {"role": "system", "content": "你是一位量化交易專家，擅長結合技術面、籌碼面與主動力道進行股價短期趨勢預測。"},
             {"role": "user", "content": prompt}
