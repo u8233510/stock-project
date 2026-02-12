@@ -3,6 +3,9 @@ import pandas as pd
 import database
 import requests
 import math
+import csv
+import io
+import re
 from duckduckgo_search import DDGS
 from urllib.parse import quote_plus
 import xml.etree.ElementTree as ET
@@ -438,11 +441,18 @@ def _fetch_twse_openapi_metrics(stock_id):
             if not isinstance(row, dict):
                 continue
 
+            gross_margin = _row_pick_first(row, ["營業毛利率(%)", "毛利率(%)", "GrossMargin", "GrossMarginRate"])
+            if _to_float(gross_margin) is None:
+                gross_profit = _to_float(_row_pick_first(row, ["營業毛利（毛損）淨額", "營業毛利", "GrossProfit"]))
+                revenue = _to_float(_row_pick_first(row, ["營業收入合計", "營業收入", "Revenue"]))
+                if gross_profit is not None and revenue not in {None, 0}:
+                    gross_margin = gross_profit / revenue * 100
+
             metrics = {
                 "latest_eps": _row_pick_first(row, ["基本每股盈餘（元）", "每股盈餘", "EPS", "BasicEarningsPerShare"]),
-                "roe": _row_pick_first(row, ["權益報酬率(%)", "ROE(%)", "ROE"]),
-                "roa": _row_pick_first(row, ["資產報酬率(%)", "ROA(%)", "ROA"]),
-                "gross_margin": _row_pick_first(row, ["營業毛利率(%)", "毛利率(%)", "GrossMargin", "GrossMarginRate"]),
+                "roe": _row_pick_first(row, ["權益報酬率(%)", "ROE(%)", "ROE", "權益報酬率"]),
+                "roa": _row_pick_first(row, ["資產報酬率(%)", "ROA(%)", "ROA", "資產報酬率"]),
+                "gross_margin": gross_margin,
                 "operating_cf": _row_pick_first(row, ["營業活動之淨現金流入（流出）", "營業現金流量", "OperatingCashFlow"]),
                 "source": f"TWSE OpenAPI:{url.rsplit('/', 1)[-1]}",
             }
@@ -454,6 +464,56 @@ def _fetch_twse_openapi_metrics(stock_id):
     return {}, "公開觀測站/證交所開放資料暫無可用欄位。"
 
 
+def _fetch_twse_csv_metrics(stock_id):
+    """CSV 版公開觀測站資料 fallback（某些環境 JSON 來源不穩定時可補位）。"""
+    sid = str(stock_id).strip()
+    endpoints = [
+        "https://mopsfin.twse.com.tw/opendata/t187ap14_L.csv",
+        "https://mopsfin.twse.com.tw/opendata/t187ap05_L.csv",
+        "https://mopsfin.twse.com.tw/opendata/t187ap04_L.csv",
+    ]
+
+    for url in endpoints:
+        try:
+            resp = requests.get(url, timeout=20)
+            if resp.status_code >= 400 or not resp.text.strip():
+                continue
+
+            rows = list(csv.DictReader(io.StringIO(resp.text)))
+            if not rows:
+                continue
+
+            row = None
+            for r in rows:
+                if str(r.get("公司代號", "")).strip() == sid:
+                    row = r
+                    break
+            if not isinstance(row, dict):
+                continue
+
+            gross_margin = _row_pick_first(row, ["營業毛利率(%)", "毛利率(%)", "營業毛利率"])
+            if _to_float(gross_margin) is None:
+                gross_profit = _to_float(_row_pick_first(row, ["營業毛利（毛損）淨額", "營業毛利"]))
+                revenue = _to_float(_row_pick_first(row, ["營業收入合計", "營業收入"]))
+                if gross_profit is not None and revenue not in {None, 0}:
+                    gross_margin = gross_profit / revenue * 100
+
+            metrics = {
+                "latest_eps": _row_pick_first(row, ["基本每股盈餘（元）", "每股盈餘", "EPS"]),
+                "roe": _row_pick_first(row, ["權益報酬率(%)", "ROE(%)", "ROE", "權益報酬率"]),
+                "roa": _row_pick_first(row, ["資產報酬率(%)", "ROA(%)", "ROA", "資產報酬率"]),
+                "gross_margin": gross_margin,
+                "operating_cf": _row_pick_first(row, ["營業活動之淨現金流入（流出）", "營業現金流量"]),
+                "source": f"TWSE CSV:{url.rsplit('/', 1)[-1]}",
+            }
+            if any(_to_float(v) is not None for k, v in metrics.items() if k != "source"):
+                return metrics, None
+        except Exception:
+            continue
+
+    return {}, "公開觀測站 CSV 來源暫無可用欄位。"
+
+
 def _fetch_public_company_metrics(stock_id):
     """公開資料 fallback：先試公開觀測站/證交所，再試 Yahoo Finance（免 key）。"""
     sid = str(stock_id).strip()
@@ -461,6 +521,10 @@ def _fetch_public_company_metrics(stock_id):
     twse_metrics, twse_warn = _fetch_twse_openapi_metrics(sid)
     if twse_metrics:
         return twse_metrics, twse_warn
+
+    csv_metrics, csv_warn = _fetch_twse_csv_metrics(sid)
+    if csv_metrics:
+        return csv_metrics, csv_warn
 
     tickers = [f"{sid}.TW", f"{sid}.TWO"]
 
@@ -497,8 +561,7 @@ def _fetch_public_company_metrics(stock_id):
         except Exception:
             continue
 
-    return {}, f"{twse_warn or '公開觀測站來源不可用'}；Yahoo Finance fallback 亦無可用結果。"
-
+    return {}, f"{twse_warn or '公開觀測站來源不可用'}；{csv_warn or '公開觀測站 CSV 來源不可用'}；Yahoo Finance fallback 亦無可用結果。"
 
 def _build_search_queries(stock_name, sid):
     """建立多角度查詢，納入公司、同產業、以及美股產業鏈訊號。"""
@@ -736,13 +799,26 @@ def _free_score_label(score):
     return "中性"
 
 
+def _normalize_metric_name(name):
+    text = str(name or "").strip().lower()
+    if not text:
+        return ""
+    text = text.replace("％", "%")
+    text = re.sub(r"[\s_\-（）()\[\]{}：:.,，。%]", "", text)
+    return text
+
+
 def _latest_metric_value(financial_df, metric_names):
     """從財報明細中取出指定指標的最新值。"""
     if financial_df.empty:
         return None
 
-    norm_names = {str(n).strip().lower() for n in metric_names}
-    matched = financial_df[financial_df["type"].astype(str).str.strip().str.lower().isin(norm_names)]
+    norm_names = {_normalize_metric_name(n) for n in metric_names if str(n).strip()}
+    if not norm_names:
+        return None
+
+    types = financial_df["type"].astype(str).map(_normalize_metric_name)
+    matched = financial_df[types.isin(norm_names)]
     if matched.empty:
         return None
     return matched.iloc[0]["value"]
@@ -1114,10 +1190,10 @@ def show_fundamental_analysis():
                     "latest_revenue": latest_revenue,
                     "oldest_revenue": oldest_revenue,
                     "revenue_growth": revenue_growth,
-                    "roe": _latest_metric_value(profit_raw, ["ROE", "Return on Equity", "ROE(%)"]),
-                    "roa": _latest_metric_value(profit_raw, ["ROA", "Return on Assets", "ROA(%)"]),
-                    "gross_margin": _latest_metric_value(profit_raw, ["Gross Margin", "Gross Margin(%)", "毛利率"]),
-                    "operating_cf": _latest_metric_value(profit_raw, ["Operating Cash Flow", "營業活動之淨現金流入（流出）", "營業現金流"]),
+                    "roe": _latest_metric_value(profit_raw, ["ROE", "Return on Equity", "ROE(%)", "權益報酬率", "股東權益報酬率"]),
+                    "roa": _latest_metric_value(profit_raw, ["ROA", "Return on Assets", "ROA(%)", "資產報酬率"]),
+                    "gross_margin": _latest_metric_value(profit_raw, ["Gross Margin", "Gross Margin(%)", "毛利率", "營業毛利率", "營業毛利率(%)"]),
+                    "operating_cf": _latest_metric_value(profit_raw, ["Operating Cash Flow", "營業活動之淨現金流入（流出）", "營業現金流", "營業現金流量"]),
                 }
 
                 # 公開資料 fallback：當內部資料不足時補齊關鍵指標
