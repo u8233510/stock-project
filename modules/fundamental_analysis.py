@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import database
 import requests
+import math
 from duckduckgo_search import DDGS
 from urllib.parse import quote_plus
 import xml.etree.ElementTree as ET
@@ -364,10 +365,100 @@ def _dedup_records(records):
     return deduped
 
 
+def _resolve_rag_config(cfg):
+    """讀取 RAG 設定；優先使用 llm.rag，並相容舊錯置到 search.rag 的情況。"""
+    llm_cfg = cfg.get("llm", {}) if isinstance(cfg, dict) else {}
+    search_cfg = cfg.get("search", {}) if isinstance(cfg, dict) else {}
+
+    llm_rag = llm_cfg.get("rag", {}) if isinstance(llm_cfg, dict) else {}
+    search_rag = search_cfg.get("rag", {}) if isinstance(search_cfg, dict) else {}
+    rag_cfg = llm_rag if llm_rag else search_rag
+
+    llm_api_key = _normalize_secret(llm_cfg.get("api_key")) if isinstance(llm_cfg, dict) else ""
+    search_api_key = _normalize_secret(search_cfg.get("api_key")) if isinstance(search_cfg, dict) else ""
+
+    return {
+        "enabled": str(rag_cfg.get("enabled", "false")).lower() == "true" if isinstance(rag_cfg, dict) else False,
+        "embedding_model": (rag_cfg.get("embedding_model") if isinstance(rag_cfg, dict) else None) or "nvidia/nv-embed-v1",
+        "top_k": int((rag_cfg.get("top_k") if isinstance(rag_cfg, dict) else 8) or 8),
+        "api_key": llm_api_key or search_api_key,
+    }
+
+
+def _embed_texts_nim(api_key, model, texts):
+    """呼叫 NVIDIA Embeddings API 取得向量。"""
+    if not api_key or not texts:
+        return []
+
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {"model": model, "input": texts}
+    resp = requests.post(
+        "https://integrate.api.nvidia.com/v1/embeddings",
+        headers=headers,
+        json=payload,
+        timeout=30,
+    )
+
+    data = resp.json() if resp.content else {}
+    if resp.status_code >= 400:
+        err_msg = data.get("error", {}).get("message", f"HTTP {resp.status_code}") if isinstance(data, dict) else f"HTTP {resp.status_code}"
+        raise RuntimeError(f"Embedding API 失敗：{err_msg}")
+
+    vectors = []
+    for row in data.get("data", []) if isinstance(data, dict) else []:
+        vec = row.get("embedding") if isinstance(row, dict) else None
+        if isinstance(vec, list):
+            vectors.append(vec)
+    return vectors
+
+
+def _cosine_similarity(vec_a, vec_b):
+    if not vec_a or not vec_b or len(vec_a) != len(vec_b):
+        return -1.0
+    dot = sum(a * b for a, b in zip(vec_a, vec_b))
+    norm_a = math.sqrt(sum(a * a for a in vec_a))
+    norm_b = math.sqrt(sum(b * b for b in vec_b))
+    if norm_a == 0 or norm_b == 0:
+        return -1.0
+    return dot / (norm_a * norm_b)
+
+
+def _apply_rag_rerank(stock_name, sid, records, cfg):
+    """對外部搜集結果做 embedding 相似度排序，取 top-k。"""
+    rag_cfg = _resolve_rag_config(cfg)
+    if not rag_cfg["enabled"]:
+        return records, None
+    if not records:
+        return records, "RAG 已啟用，但目前沒有可重排序的外部資料。"
+    if not rag_cfg["api_key"]:
+        return records, "RAG 已啟用但缺少 API key（請設定 llm.api_key 或 search.api_key）。"
+
+    top_k = max(1, min(rag_cfg["top_k"], len(records)))
+    query = f"{stock_name} {sid} 基本面 公司定位 新聞 風險"
+    doc_texts = [f"{r.get('title', '')}\n{r.get('snippet', '')}\n{r.get('url', '')}" for r in records]
+
+    try:
+        q_vecs = _embed_texts_nim(rag_cfg["api_key"], rag_cfg["embedding_model"], [query])
+        d_vecs = _embed_texts_nim(rag_cfg["api_key"], rag_cfg["embedding_model"], doc_texts)
+        if not q_vecs or len(d_vecs) != len(records):
+            return records, "RAG 重排序略過：embedding 回傳不完整。"
+
+        q_vec = q_vecs[0]
+        scored = []
+        for rec, d_vec in zip(records, d_vecs):
+            sim = _cosine_similarity(q_vec, d_vec)
+            scored.append((sim, rec))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        reranked = [rec for _, rec in scored[:top_k]]
+        return reranked, f"RAG 重排序已啟用：模型 {rag_cfg['embedding_model']}，保留 Top-{top_k}。"
+    except Exception as exc:
+        return records, f"RAG 重排序失敗，回退原始搜尋結果：{str(exc)}"
+
+
 def _build_external_context(stock_name, sid, cfg):
     """蒐集外部資訊（可配置付費/免費來源 + 社群網站搜尋）。"""
     search_cfg = cfg.get("search", {})
-    preferred_provider = str(search_cfg.get("provider", "openrouter_then_rss")).lower().strip()
+    preferred_provider = str(search_cfg.get("provider", "rss_then_wiki")).lower().strip()
 
     records = []
     warnings = []
@@ -388,7 +479,7 @@ def _build_external_context(stock_name, sid, cfg):
                 records.extend(or_records)
                 if or_records:
                     _external_cache_set(cache_key, or_records)
-                if or_warn:
+                if or_warn and "未設定 openrouter_api_key" not in str(or_warn):
                     warnings.append(f"[{tag}] {or_warn}")
             openrouter_queries_used += 1
         elif preferred_provider == "perplexity":
@@ -415,8 +506,6 @@ def _build_external_context(stock_name, sid, cfg):
 
     wiki_records, wiki_warn = _wikipedia_summary_search(stock_name, sid)
     records.extend(wiki_records)
-    if wiki_warn:
-        warnings.append(wiki_warn)
 
     # 社群/輿情（可選，避免 DDG 品質差時引入噪音）
     if use_ddg:
@@ -432,6 +521,10 @@ def _build_external_context(stock_name, sid, cfg):
                 warnings.append(social_warn)
 
     records = _dedup_records(records)
+    records, rag_warning = _apply_rag_rerank(stock_name, sid, records, cfg)
+    if rag_warning:
+        warnings.insert(0, rag_warning)
+
     if not records:
         warnings.insert(0, "目前未取得外部來源。請先檢查下方各來源診斷訊息。")
         return "", warnings
@@ -445,13 +538,7 @@ def _build_external_context(stock_name, sid, cfg):
         tier_counts[tier] = tier_counts.get(tier, 0) + 1
     summary = "、".join([f"{k}:{v}" for k, v in source_counts.items()])
     tier_summary = "、".join([f"{k}:{v}" for k, v in tier_counts.items() if v > 0])
-    warnings.insert(0, f"外部來源抓取成功（{summary}；來源分級 {tier_summary}）。已停用 Google Custom Search JSON API，改採 OpenRouter + Google News RSS/Wikipedia。")
-
-    mapping_info = _resolve_us_mapping(sid, stock_name)
-    if mapping_info["mapping_type"] == "direct_adr":
-        warnings.insert(1, f"美股對應：{sid} → {mapping_info['ticker']}（direct_adr, confidence={mapping_info['confidence']:.2f}）")
-    else:
-        warnings.insert(1, f"美股對應：目前無白名單 ADR 對應（{sid}），後續可由外部結構化來源補強。")
+    warnings.insert(0, f"外部來源抓取成功（{summary}；來源分級 {tier_summary}）。目前使用 Google News RSS / Wikipedia（可依設定切換其他來源）。")
 
     lines = []
     for rec in records[:24]:
@@ -556,7 +643,7 @@ def _build_free_fundamental_report(stock_name, sid, search_ctx, metrics):
 
     ext_note = "未取得外部新聞摘要。"
     if search_ctx:
-        ext_note = "已納入 OpenRouter / RSS / Wikipedia 等外部摘要，並交叉對照資料庫數據。"
+        ext_note = "已納入 RSS / Wikipedia 等外部摘要，並交叉對照資料庫數據。"
 
     data_quality_level, data_quality_ratio = _compute_data_quality(metrics)
 
