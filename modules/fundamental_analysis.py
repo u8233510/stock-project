@@ -1,6 +1,10 @@
+from datetime import datetime
+
 import streamlit as st
 from duckduckgo_search import DDGS
 from datetime import datetime
+
+import database
 
 
 def render_stock_news(sid: str, sname: str):
@@ -69,6 +73,24 @@ def render_stock_news(sid: str, sname: str):
     except Exception as e:
         st.error(f"搜尋新聞時發生錯誤：{str(e)}")
         st.info("建議檢查網路連線，或稍後再試。")
+
+
+def show_fundamental_analysis():
+    """保持與 app.py 相容的入口函數。"""
+    st.markdown("### 💎 基本面分析（新聞）")
+
+    cfg = database.load_config()
+    universe = cfg.get("universe", [])
+    if not universe:
+        st.error("universe 未設定，請先在設定檔配置標的。")
+        return
+
+    stock_options = {f"{s['stock_id']} {s['name']}": (s["stock_id"], s["name"]) for s in universe}
+    selected_label = st.selectbox("選擇股票", list(stock_options.keys()))
+    sid, sname = stock_options[selected_label]
+
+    if st.button("🔍 搜尋最新新聞", use_container_width=True):
+        render_stock_news(sid, sname)
 
 
 # 如果此程式被當作主程式執行 (測試用)
