@@ -94,29 +94,67 @@ def _external_cache_set(query, records):
 def _google_news_rss_search(query, max_results=4):
     """免費補強來源：Google News RSS（不需付費，不用 Search Console）。"""
     try:
-        rss_url = f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
-        resp = requests.get(rss_url, timeout=20)
-        if resp.status_code >= 400:
-            return [], f"Google News RSS 失敗：HTTP {resp.status_code}"
-
-        root = ET.fromstring(resp.text)
-        items = root.findall('.//item')
-        records = []
-        for item in items[:max_results]:
-            link = (item.findtext('link') or '').strip()
-            records.append(
-                {
-                    "source": "GoogleNewsRSS",
-                    "title": (item.findtext('title') or '').strip(),
-                    "snippet": (item.findtext('description') or '').strip(),
-                    "url": link,
-                    "tier": _classify_source_tier(link),
-                }
-            )
-
-        if not records:
+        base_query = str(query or "").strip()
+        if not base_query:
             return [], "Google News RSS 查詢無結果。"
-        return records, None
+
+        token_blacklist = {
+            "同產業", "台股", "近況", "訂單", "台灣", "產業新聞", "景氣", "循環", "美股", "指數", "財報", "展望",
+            "earnings", "guidance", "margin", "demand",
+        }
+        cleaned_tokens = [
+            tok for tok in base_query.split()
+            if tok and tok not in token_blacklist and not tok.isdigit()
+        ]
+
+        query_candidates = [base_query]
+        if cleaned_tokens:
+            query_candidates.append(" ".join(cleaned_tokens[:3]))
+            query_candidates.append(cleaned_tokens[0])
+
+        seen = set()
+        dedup_queries = []
+        for q in query_candidates:
+            qq = q.strip()
+            if qq and qq not in seen:
+                seen.add(qq)
+                dedup_queries.append(qq)
+
+        locale_candidates = [
+            ("zh-TW", "TW", "TW:zh-Hant"),
+            ("zh-CN", "CN", "CN:zh-Hans"),
+            ("en", "US", "US:en"),
+        ]
+
+        for q in dedup_queries:
+            for hl, gl, ceid in locale_candidates:
+                rss_url = f"https://news.google.com/rss/search?q={quote_plus(q)}&hl={hl}&gl={gl}&ceid={ceid}"
+                resp = requests.get(
+                    rss_url,
+                    timeout=20,
+                    headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8"},
+                )
+                if resp.status_code >= 400:
+                    continue
+
+                root = ET.fromstring(resp.text)
+                items = root.findall('.//item')
+                records = []
+                for item in items[:max_results]:
+                    link = (item.findtext('link') or '').strip()
+                    records.append(
+                        {
+                            "source": "GoogleNewsRSS",
+                            "title": (item.findtext('title') or '').strip(),
+                            "snippet": (item.findtext('description') or '').strip(),
+                            "url": link,
+                            "tier": _classify_source_tier(link),
+                        }
+                    )
+                if records:
+                    return records, None
+
+        return [], f"Google News RSS 查詢無結果（原始查詢：{base_query}）。"
     except Exception as exc:
         return [], f"Google News RSS 例外：{str(exc)}"
 
