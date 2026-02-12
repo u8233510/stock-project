@@ -28,16 +28,10 @@
     "model": "meta/llama-3.1-70b-instruct"
   },
   "search": {
-    "provider": "google_then_rss",
+    "provider": "openrouter_then_rss",
 
-    "google_api_key": "YOUR_GOOGLE_CSE_API_KEY",
-    "google_cse_id": "YOUR_GOOGLE_CSE_ID",
-    "google_daily_free_limit": 100,
-    "google_queries_per_run": 2,
-
-    "enable_ddg": false,
-
-    "openrouter_api_key": "",
+    "openrouter_api_key": "YOUR_OPENROUTER_API_KEY",
+    "openrouter_queries_per_run": 2,
     "openrouter_model": "perplexity/sonar",
     "openrouter_site_url": "https://localhost",
     "openrouter_app_name": "stock-project",
@@ -55,14 +49,12 @@
 
 ## `search.provider` 如何選
 
-- `google_then_rss`（預設建議）  
-  Google CSE（有額度保護）+ Google News RSS + Wikipedia。
+- `openrouter_then_rss`（預設建議）  
+  OpenRouter + Google News RSS + Wikipedia。
 - `openrouter`  
-  使用 OpenRouter 產生外部摘要（需 `openrouter_api_key`）。
-- `google_then_ddg`  
-  Google + DDG（僅在你想加 DDG 時）。
-- `google`  
-  只用 Google CSE（若額度到上限仍會顯示警告）。
+  只用 OpenRouter（需 `openrouter_api_key`）。
+- `openrouter_then_ddg`  
+  OpenRouter + DDG（僅在你想加 DDG 時）。
 - `perplexity`  
   使用 Perplexity API（需 key）。
 - `puter`  
@@ -72,8 +64,8 @@
 
 ## 快速建議
 
-1. 先用 `google_then_rss` 跑起來（免費且相對穩定）。
-2. 有 OpenRouter key 再改成 `openrouter`；若你要試 Puter 可改成 `puter`。
+1. 先用 `openrouter_then_rss` 跑起來（穩定且資訊來源完整）。
+2. 你有免費 OpenRouter key 時，直接填 `openrouter_api_key` 即可使用。
 3. 若 DDG 品質不穩，保持 `enable_ddg: false`。
 
 ---
@@ -93,8 +85,11 @@
 ### 不想用 Perplexity API 也可以
 
 本專案已提供不用 Perplexity API 的路線：
-- `google_then_rss`（預設）：Google CSE + Google News RSS + Wikipedia
-- `google_then_ddg`：若你想額外加 DDG
-- `openrouter`：若你有 OpenRouter key，可改用 OpenRouter（其中也可選 Perplexity 模型）
+- `openrouter_then_rss`（預設）：OpenRouter + Google News RSS + Wikipedia
+- `openrouter_then_ddg`：若你想額外加 DDG
+- `openrouter`：若你有 OpenRouter key，可走純 OpenRouter 摘要
 
 也就是說：**不是一定要 Perplexity API**，只是「若要用 Perplexity 作為後端 provider」，API 會是較穩定可控的做法。
+
+
+> 註：Google Custom Search JSON API 已不再納入此專案流程。
