@@ -141,6 +141,9 @@ def _build_queries(sid: str, sname: str) -> list[str]:
         f"{sid} 股票 新聞",
     ]
 
+def _parse_news_date(date_str: str):
+    if not date_str:
+        return datetime.min
 
 def _fetch_dgs_news(sid: str, sname: str, timelimit: str = "y") -> list[dict]:
     queries = _build_queries(sid, sname)
