@@ -197,11 +197,36 @@ def show_branch_analysis():
     with c1:
         sid_label = st.selectbox("分析標的", list(stock_options.keys()), label_visibility="collapsed")
         sid = stock_options[sid_label]
+
+    date_bounds = conn.execute(
+        """
+        SELECT MIN(date), MAX(date)
+        FROM branch_price_daily
+        WHERE stock_id = ?
+        """,
+        (sid,),
+    ).fetchone()
+    min_date_raw, max_date_raw = date_bounds if date_bounds else (None, None)
+    min_available_date = pd.to_datetime(min_date_raw).date() if min_date_raw else None
+    max_available_date = pd.to_datetime(max_date_raw).date() if max_date_raw else None
+
     with c2:
-        # ✅ 修改：預設值改為今日往前 60 天
-        def_s = pd.to_datetime("today") - pd.Timedelta(days=60)
-        def_e = pd.to_datetime("today")
-        date_range = st.date_input("日期區間", value=[def_s, def_e], label_visibility="collapsed")
+        if max_available_date:
+            default_end = max_available_date
+            default_start = max(min_available_date, default_end - pd.Timedelta(days=60))
+            date_range = st.date_input(
+                "日期區間",
+                value=[default_start, default_end],
+                min_value=min_available_date,
+                max_value=max_available_date,
+                label_visibility="collapsed",
+            )
+        else:
+            date_range = st.date_input(
+                "日期區間",
+                value=[pd.to_datetime("today") - pd.Timedelta(days=60), pd.to_datetime("today")],
+                label_visibility="collapsed",
+            )
     with c3:
         analyze_btn = st.button("🚀 執行", use_container_width=True)
     with c4:
@@ -217,6 +242,10 @@ def show_branch_analysis():
         industry_name = row[0] if row else "未知產業"
     
     st.info(f"📍 當前標的：**{sid_label}** | 所屬產業鏈：**{industry_name}**")
+
+    if not max_available_date:
+        st.warning("此標的尚無分點資料，暫時無法執行分點分析。")
+        return
 
     if not (isinstance(date_range, (list, tuple)) and len(date_range) == 2): return
     start_d, end_d = pd.to_datetime(date_range[0]).date(), pd.to_datetime(date_range[1]).date()
@@ -243,6 +272,11 @@ def show_branch_analysis():
             conn,
             params=(sid, start_d.isoformat(), end_d.isoformat()),
         )
+
+        if interval_df.empty:
+            st.warning("所選日期區間沒有分點資料，請調整日期後再執行。")
+            return
+
         main_force_cost, total_net_volume, chip_concentration = _compute_interval_metrics(interval_df, top_n=top_n)
 
         if analyze_btn:
