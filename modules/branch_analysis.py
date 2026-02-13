@@ -4,6 +4,7 @@ import pandas as pd
 import database
 import json
 import requests
+import importlib.util
 import plotly.graph_objects as go
 from utility.weighted_cost_utils import compute_interval_metrics
 from utility.branch_weighted_cost_helpers import format_snapshot_caption
@@ -88,6 +89,101 @@ def _load_window_snapshot(conn, sid, window):
     ).fetchone()
 
 
+def _run_lightgbm_branch_forecast(conn, sid, current_price, main_force_cost, chip_concentration):
+    if importlib.util.find_spec("lightgbm") is None:
+        return {"status": "missing_dependency", "message": "尚未安裝 lightgbm，請先 `pip install lightgbm`。"}
+
+    from lightgbm import LGBMRegressor
+
+    features = pd.read_sql(
+        """
+        SELECT
+            end_date,
+            MAX(CASE WHEN window_days = 5 THEN avg_cost END) AS avg_cost_5,
+            MAX(CASE WHEN window_days = 20 THEN avg_cost END) AS avg_cost_20,
+            MAX(CASE WHEN window_days = 60 THEN avg_cost END) AS avg_cost_60,
+            MAX(CASE WHEN window_days = 5 THEN total_net_volume END) AS net_vol_5,
+            MAX(CASE WHEN window_days = 20 THEN total_net_volume END) AS net_vol_20,
+            MAX(CASE WHEN window_days = 60 THEN total_net_volume END) AS net_vol_60,
+            MAX(CASE WHEN window_days = 5 THEN concentration END) AS concentration_5,
+            MAX(CASE WHEN window_days = 20 THEN concentration END) AS concentration_20,
+            MAX(CASE WHEN window_days = 60 THEN concentration END) AS concentration_60
+        FROM branch_weighted_cost
+        WHERE stock_id = ?
+          AND window_type = 'rolling'
+          AND window_days IN (5, 20, 60)
+        GROUP BY end_date
+        ORDER BY end_date ASC
+        """,
+        conn,
+        params=(sid,),
+    )
+    prices = pd.read_sql(
+        """
+        SELECT date, close
+        FROM stock_ohlcv_daily
+        WHERE stock_id = ?
+        ORDER BY date ASC
+        """,
+        conn,
+        params=(sid,),
+    )
+
+    if features.empty or prices.empty:
+        return {"status": "insufficient_data", "message": "歷史特徵資料不足，無法訓練 LightGBM。"}
+
+    features["end_date"] = pd.to_datetime(features["end_date"])
+    prices["date"] = pd.to_datetime(prices["date"])
+    prices["future_close_5"] = prices["close"].shift(-5)
+    prices["future_return_5d"] = ((prices["future_close_5"] - prices["close"]) / prices["close"]) * 100
+
+    ds = features.merge(prices[["date", "close", "future_return_5d"]], left_on="end_date", right_on="date", how="inner")
+    ds["cost_gap_20"] = ((ds["close"] - ds["avg_cost_20"]) / ds["avg_cost_20"]) * 100
+
+    feature_cols = [
+        "avg_cost_5", "avg_cost_20", "avg_cost_60",
+        "net_vol_5", "net_vol_20", "net_vol_60",
+        "concentration_5", "concentration_20", "concentration_60",
+        "cost_gap_20",
+    ]
+    model_ds = ds.dropna(subset=feature_cols + ["future_return_5d"]).copy()
+
+    if len(model_ds) < 40:
+        return {"status": "insufficient_data", "message": f"可用樣本僅 {len(model_ds)} 筆，至少需要 40 筆。"}
+
+    split_idx = int(len(model_ds) * 0.8)
+    train_df = model_ds.iloc[:split_idx]
+    test_df = model_ds.iloc[split_idx:]
+    if test_df.empty:
+        return {"status": "insufficient_data", "message": "測試資料不足，無法評估模型。"}
+
+    model = LGBMRegressor(
+        n_estimators=300,
+        learning_rate=0.05,
+        max_depth=4,
+        num_leaves=31,
+        random_state=42,
+    )
+    model.fit(train_df[feature_cols], train_df["future_return_5d"])
+    test_pred = model.predict(test_df[feature_cols])
+    mae = (pd.Series(test_pred).reset_index(drop=True) - test_df["future_return_5d"].reset_index(drop=True)).abs().mean()
+
+    latest_row = model_ds.iloc[-1].copy()
+    latest_row["avg_cost_20"] = main_force_cost
+    latest_row["concentration_20"] = chip_concentration
+    latest_row["cost_gap_20"] = ((current_price - main_force_cost) / main_force_cost) * 100 if main_force_cost else 0
+    forecast = float(model.predict(pd.DataFrame([latest_row[feature_cols]]))[0])
+
+    return {
+        "status": "ok",
+        "samples": int(len(model_ds)),
+        "train_samples": int(len(train_df)),
+        "test_samples": int(len(test_df)),
+        "mae": round(float(mae), 3),
+        "pred_return_5d": round(forecast, 2),
+    }
+
+
 
 
 def show_branch_analysis():
@@ -159,6 +255,19 @@ def show_branch_analysis():
             cost_gap = round(((current_price - main_force_cost) / main_force_cost) * 100, 2) if main_force_cost > 0 else 0
             st.metric("目前價格位階", f"{cost_gap}%", delta=f"{cost_gap}%", delta_color="normal")
         with m3: st.metric("買方籌碼集中度", f"{chip_concentration}%")
+
+        lgbm_result = _run_lightgbm_branch_forecast(conn, sid, current_price, main_force_cost, chip_concentration)
+        with st.expander("📈 LightGBM 分點訊號（未來 5 日）", expanded=True):
+            if lgbm_result["status"] == "ok":
+                st.metric("預估 5 日報酬", f"{lgbm_result['pred_return_5d']}%")
+                st.caption(
+                    f"樣本數 {lgbm_result['samples']}（訓練 {lgbm_result['train_samples']} / 測試 {lgbm_result['test_samples']}），"
+                    f"測試 MAE：{lgbm_result['mae']}"
+                )
+            elif lgbm_result["status"] == "missing_dependency":
+                st.warning(lgbm_result["message"])
+            else:
+                st.info(lgbm_result["message"])
 
         if chip_concentration > 30:
             st.error(f"⚠️ 偵測到籌碼異常集中！前五大分點買超佔比達 {chip_concentration}%")
