@@ -55,38 +55,70 @@ def _compute_interval_metrics(df, top_n=15):
     return compute_interval_metrics(df, top_n=top_n)
 
 
-def _upsert_interval_metrics(conn, sid, start_date, end_date, avg_cost, total_net_volume, concentration):
-    window_days = (pd.to_datetime(end_date).date() - pd.to_datetime(start_date).date()).days + 1
-    conn.execute(
+def _compute_window_snapshot_from_branch(interval_df, end_date, top_n=15):
+    if interval_df.empty:
+        return None
+    avg_cost, total_net_volume, concentration = _compute_interval_metrics(interval_df, top_n=top_n)
+    return (float(avg_cost or 0), int(total_net_volume or 0), float(concentration or 0), str(end_date))
+
+
+def _build_lightgbm_feature_frame(conn, sid, max_trade_days=320, top_n=15):
+    trade_dates_desc = conn.execute(
         """
-        INSERT OR REPLACE INTO branch_weighted_cost
-        (stock_id, start_date, end_date, avg_cost, total_net_volume, concentration, window_type, window_days)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        SELECT DISTINCT date
+        FROM branch_price_daily
+        WHERE stock_id = ?
+        ORDER BY date DESC
+        LIMIT ?
         """,
-        (
-            sid,
-            str(start_date),
-            str(end_date),
-            float(avg_cost or 0),
-            int(total_net_volume or 0),
-            float(concentration or 0),
-            "user_custom",
-            int(window_days),
-        ),
+        (sid, int(max_trade_days)),
+    ).fetchall()
+
+    trade_dates = sorted([str(r[0])[:10] for r in trade_dates_desc if r and r[0]])
+    if not trade_dates:
+        return pd.DataFrame()
+
+    start_date = trade_dates[0]
+    end_date = trade_dates[-1]
+    branch_df = pd.read_sql(
+        """
+        SELECT date, securities_trader_id, price, buy, sell
+        FROM branch_price_daily
+        WHERE stock_id = ?
+          AND date >= ?
+          AND date <= ?
+        """,
+        conn,
+        params=(sid, start_date, end_date),
     )
+    if branch_df.empty:
+        return pd.DataFrame()
 
+    branch_df["date"] = pd.to_datetime(branch_df["date"])
+    trade_ts = pd.to_datetime(trade_dates)
+    records = []
 
-def _load_window_snapshot(conn, sid, window):
-    return conn.execute(
-        """
-        SELECT avg_cost, total_net_volume, concentration, end_date
-        FROM branch_weighted_cost
-        WHERE stock_id = ? AND window_type = 'rolling' AND window_days = ?
-        ORDER BY end_date DESC
-        LIMIT 1
-        """,
-        (sid, int(window)),
-    ).fetchone()
+    for idx, end_ts in enumerate(trade_ts):
+        row = {"end_date": end_ts}
+        ok = True
+        for window in (5, 20, 60):
+            if idx + 1 < window:
+                ok = False
+                break
+            start_ts = trade_ts[idx - window + 1]
+            mask = (branch_df["date"] >= start_ts) & (branch_df["date"] <= end_ts)
+            interval_df = branch_df.loc[mask, ["securities_trader_id", "price", "buy", "sell"]]
+            if interval_df.empty:
+                ok = False
+                break
+            avg_cost, total_net_volume, concentration = _compute_interval_metrics(interval_df, top_n=top_n)
+            row[f"avg_cost_{window}"] = float(avg_cost or 0)
+            row[f"net_vol_{window}"] = int(total_net_volume or 0)
+            row[f"concentration_{window}"] = float(concentration or 0)
+        if ok:
+            records.append(row)
+
+    return pd.DataFrame(records)
 
 
 def _run_lightgbm_branch_forecast(conn, sid, current_price, main_force_cost, chip_concentration):
@@ -95,29 +127,7 @@ def _run_lightgbm_branch_forecast(conn, sid, current_price, main_force_cost, chi
 
     from lightgbm import LGBMRegressor
 
-    features = pd.read_sql(
-        """
-        SELECT
-            end_date,
-            MAX(CASE WHEN window_days = 5 THEN avg_cost END) AS avg_cost_5,
-            MAX(CASE WHEN window_days = 20 THEN avg_cost END) AS avg_cost_20,
-            MAX(CASE WHEN window_days = 60 THEN avg_cost END) AS avg_cost_60,
-            MAX(CASE WHEN window_days = 5 THEN total_net_volume END) AS net_vol_5,
-            MAX(CASE WHEN window_days = 20 THEN total_net_volume END) AS net_vol_20,
-            MAX(CASE WHEN window_days = 60 THEN total_net_volume END) AS net_vol_60,
-            MAX(CASE WHEN window_days = 5 THEN concentration END) AS concentration_5,
-            MAX(CASE WHEN window_days = 20 THEN concentration END) AS concentration_20,
-            MAX(CASE WHEN window_days = 60 THEN concentration END) AS concentration_60
-        FROM branch_weighted_cost
-        WHERE stock_id = ?
-          AND window_type = 'rolling'
-          AND window_days IN (5, 20, 60)
-        GROUP BY end_date
-        ORDER BY end_date ASC
-        """,
-        conn,
-        params=(sid,),
-    )
+    features = _build_lightgbm_feature_frame(conn, sid, max_trade_days=320, top_n=15)
     prices = pd.read_sql(
         """
         SELECT date, close
@@ -279,10 +289,6 @@ def show_branch_analysis():
 
         main_force_cost, total_net_volume, chip_concentration = _compute_interval_metrics(interval_df, top_n=top_n)
 
-        if analyze_btn:
-            _upsert_interval_metrics(conn, sid, start_d.isoformat(), end_d.isoformat(), main_force_cost, total_net_volume, chip_concentration)
-            conn.commit()
-
         m1, m2, m3 = st.columns(3)
         with m1: st.metric("核心主力加權成本", f"${main_force_cost}")
         with m2:
@@ -309,9 +315,37 @@ def show_branch_analysis():
         st.caption("最新 rolling 快照：5日 / 20日 / 60日")
         w1, w2, w3 = st.columns(3)
         for col, window in zip([w1, w2, w3], [5, 20, 60]):
-            row = _load_window_snapshot(conn, sid, window)
+            hist_dates = conn.execute(
+                """
+                SELECT DISTINCT date
+                FROM branch_price_daily
+                WHERE stock_id = ?
+                ORDER BY date DESC
+                LIMIT ?
+                """,
+                (sid, int(window)),
+            ).fetchall()
+
             with col:
-                if row:
+                if len(hist_dates) == int(window):
+                    dates = sorted([str(d[0])[:10] for d in hist_dates if d and d[0]])
+                    win_start, win_end = dates[0], dates[-1]
+                    snap_df = pd.read_sql(
+                        """
+                        SELECT securities_trader_id, price, buy, sell
+                        FROM branch_price_daily
+                        WHERE stock_id = ?
+                          AND date >= ?
+                          AND date <= ?
+                        """,
+                        conn,
+                        params=(sid, win_start, win_end),
+                    )
+                    row = _compute_window_snapshot_from_branch(snap_df, win_end, top_n=15)
+                else:
+                    row = None
+
+                if row is not None:
                     st.metric(f"{window}日均價成本", f"${row[0]:.2f}")
                     st.caption(format_snapshot_caption(row))
                 else:
