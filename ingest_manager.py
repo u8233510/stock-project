@@ -277,6 +277,30 @@ def _exclude_weekends(dates):
     return [d for d in dates if d.weekday() < 5]
 
 
+def _normalize_to_date_str(series):
+    if series is None:
+        return pd.Series(dtype="string")
+    normalized = pd.to_datetime(series, errors="coerce")
+    return normalized.dt.strftime("%Y-%m-%d")
+
+
+def _filter_df_by_trade_date(df, trade_date):
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    date_like_cols = [c for c in df.columns if "date" in str(c).lower()]
+    if not date_like_cols:
+        return df
+
+    for col in date_like_cols:
+        normalized = _normalize_to_date_str(df[col])
+        matched = df[normalized == trade_date]
+        if not matched.empty:
+            return matched
+
+    return pd.DataFrame(columns=df.columns)
+
+
 def get_pending_dates(conn, stock_id, api_name, target_start, target_end=None, check_freq="B"):
     """依據同步區間 -> 排除已知休市 -> 比對 ingest_log，挑出 Missing/Failed 日期。"""
     today = datetime.now().date()
@@ -428,16 +452,27 @@ def start_ingest(st_placeholder=None):
                             end_date=d_str,
                         )
 
-                    if df is not None and not df.empty:
-                        clean_df = process_data(df, table, conn)
+                    api_count = 0 if df is None else len(df)
+                    date_filtered_df = _filter_df_by_trade_date(df, d_str)
+
+                    if not date_filtered_df.empty:
+                        clean_df = process_data(date_filtered_df, table, conn)
                         upsert_data(conn, table, clean_df)
                         if resolved_date_col in clean_df.columns:
                             db_count = int((clean_df[resolved_date_col].astype(str).str[:10] == d_str).sum())
                         else:
                             db_count = len(clean_df)
-                        _write_data_ingest_log(conn, d_str, sid, fm_api, len(df), db_count, "Success")
+                        _write_data_ingest_log(
+                            conn,
+                            d_str,
+                            sid,
+                            fm_api,
+                            api_count,
+                            db_count,
+                            "Success",
+                        )
                     else:
-                        _write_data_ingest_log(conn, d_str, sid, fm_api, 0, 0, "NoTrade")
+                        _write_data_ingest_log(conn, d_str, sid, fm_api, api_count, 0, "NoTrade")
 
                     time.sleep(sleep_sec)
 
