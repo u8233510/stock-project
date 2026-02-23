@@ -108,10 +108,23 @@ def show_tech_analysis():
     fig.add_trace(go.Scatter(x=df_display['date'], y=df_display['STOCHd_9_3_3'], name="D值 (9,3)"), row=3, col=1)
     fig.add_trace(go.Scatter(x=df_display['date'], y=df_display['RSI'], name="RSI (14)", line=dict(color='purple')), row=3, col=1)
     
-    macd_hist_colors = ['red' if val >= 0 else 'green' for val in df_display['MACDh_12_26_9']]
-    fig.add_trace(go.Bar(x=df_display['date'], y=df_display['MACDh_12_26_9'], name="MACD柱", marker_color=macd_hist_colors), row=4, col=1)
-    fig.add_trace(go.Scatter(x=df_display['date'], y=df_display['MACD_12_26_9'], name="DIF", line=dict(color='black')), row=4, col=1)
-    fig.add_trace(go.Scatter(x=df_display['date'], y=df_display['MACDs_12_26_9'], name="Signal", line=dict(color='blue')), row=4, col=1)
+    # pandas_ta 不同版本可能會產生不同 MACD 欄位命名，這裡動態尋找避免 KeyError
+    macd_col = next((c for c in df_display.columns if c.startswith("MACD_") and not c.startswith("MACDh_") and not c.startswith("MACDs_")), None)
+    macd_hist_col = next((c for c in df_display.columns if c.startswith("MACDh_")), None)
+    macd_signal_col = next((c for c in df_display.columns if c.startswith("MACDs_")), None)
+
+    if macd_hist_col:
+        macd_hist_colors = ['red' if val >= 0 else 'green' for val in df_display[macd_hist_col]]
+        fig.add_trace(go.Bar(x=df_display['date'], y=df_display[macd_hist_col], name="MACD柱", marker_color=macd_hist_colors), row=4, col=1)
+
+    if macd_col:
+        fig.add_trace(go.Scatter(x=df_display['date'], y=df_display[macd_col], name="DIF", line=dict(color='black')), row=4, col=1)
+
+    if macd_signal_col:
+        fig.add_trace(go.Scatter(x=df_display['date'], y=df_display[macd_signal_col], name="Signal", line=dict(color='blue')), row=4, col=1)
+
+    if not any([macd_col, macd_hist_col, macd_signal_col]):
+        st.warning("⚠️ MACD 欄位未產生，可能是資料筆數不足或套件版本差異。")
 
     # 5. 隱藏非交易日邏輯
     all_dates = pd.date_range(start=df_display['date'].min(), end=df_display['date'].max())
