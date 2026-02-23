@@ -277,7 +277,15 @@ def _exclude_weekends(dates):
     return [d for d in dates if d.weekday() < 5]
 
 
-def get_pending_dates(conn, stock_id, api_name, target_start, target_end=None, check_freq="B"):
+def get_pending_dates(
+    conn,
+    stock_id,
+    api_name,
+    target_start,
+    target_end=None,
+    check_freq="B",
+    retry_notrade_days=14,
+):
     """依據同步區間 -> 排除已知休市 -> 比對 ingest_log，挑出 Missing/Failed 日期。"""
     today = datetime.now().date()
     t_start = datetime.strptime(target_start, "%Y-%m-%d").date()
@@ -293,7 +301,13 @@ def get_pending_dates(conn, stock_id, api_name, target_start, target_end=None, c
         return []
 
     holidays = _get_known_holidays(conn, stock_id=stock_id, api_name=api_name)
-    candidate_dates = [d for d in candidate_dates if d == today or d not in holidays]
+    # NoTrade 可能是「來源延遲上線」而非真正休市；近期日期保留重試機會。
+    retry_cutoff = today - timedelta(days=max(int(retry_notrade_days or 0), 0))
+    candidate_dates = [
+        d
+        for d in candidate_dates
+        if d == today or d >= retry_cutoff or d not in holidays
+    ]
     if not candidate_dates:
         return []
 
@@ -313,13 +327,14 @@ def get_pending_dates(conn, stock_id, api_name, target_start, target_end=None, c
     ).fetchall()
 
     status_map = {str(d)[:10]: s for d, s in rows if d}
+    retry_cutoff = today - timedelta(days=max(int(retry_notrade_days or 0), 0))
     pending_dates = []
     for d in candidate_dates:
         d_str = d.strftime("%Y-%m-%d")
         status = status_map.get(d_str)
         if status == "Success":
             continue
-        if d != today and status == "NoTrade":
+        if d != today and status == "NoTrade" and d < retry_cutoff:
             continue
         pending_dates.append(d)
 
@@ -340,6 +355,7 @@ def start_ingest(st_placeholder=None):
     t_start = cfg["ingest_master"]["start_date"]
     t_end = cfg.get("ingest_master", {}).get("end_date")
     sleep_sec = float(cfg.get("ingest", {}).get("sleep_seconds", 0.3))
+    retry_notrade_days = int(cfg.get("ingest", {}).get("retry_notrade_days", 14))
 
     d_map = {
         "ohlcv": ("TaiwanStockPrice", "stock_ohlcv_daily", "date", "B"),
@@ -399,6 +415,7 @@ def start_ingest(st_placeholder=None):
                 t_start,
                 target_end=t_end,
                 check_freq=check_freq,
+                retry_notrade_days=retry_notrade_days,
             )
 
             if not pending_dates and key != "branch":
@@ -416,7 +433,10 @@ def start_ingest(st_placeholder=None):
                         continue
                     is_today = d_str == datetime.now().strftime("%Y-%m-%d")
                     if (not is_today) and status == "NoTrade":
-                        continue
+                        day = datetime.strptime(d_str, "%Y-%m-%d").date()
+                        retry_cutoff = datetime.now().date() - timedelta(days=max(int(retry_notrade_days or 0), 0))
+                        if day < retry_cutoff:
+                            continue
 
                     if key == "branch":
                         df = api.taiwan_stock_trading_daily_report(stock_id=sid, date=d_str)

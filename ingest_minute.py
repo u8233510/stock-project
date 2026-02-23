@@ -93,7 +93,14 @@ def _require_column(column_name, table_name, keywords):
     return column_name
 
 
-def _get_pending_dates_for_minute(conn, stock_id, target_start, target_end, api_name=MINUTE_API_NAME):
+def _get_pending_dates_for_minute(
+    conn,
+    stock_id,
+    target_start,
+    target_end,
+    api_name=MINUTE_API_NAME,
+    retry_notrade_days=14,
+):
     t_start = datetime.strptime(target_start, "%Y-%m-%d").date()
     t_end = datetime.strptime(target_end, "%Y-%m-%d").date()
     today = datetime.now().date()
@@ -103,7 +110,12 @@ def _get_pending_dates_for_minute(conn, stock_id, target_start, target_end, api_
         return []
 
     holidays = _get_known_holidays(conn, stock_id=stock_id, api_name=api_name)
-    candidate_dates = [d for d in candidate_dates if d == today or d not in holidays]
+    retry_cutoff = today - timedelta(days=max(int(retry_notrade_days or 0), 0))
+    candidate_dates = [
+        d
+        for d in candidate_dates
+        if d == today or d >= retry_cutoff or d not in holidays
+    ]
     if not candidate_dates:
         return []
 
@@ -128,7 +140,7 @@ def _get_pending_dates_for_minute(conn, stock_id, target_start, target_end, api_
         status = status_map.get(d_str)
         if status == "Success":
             continue
-        if d != today and status == "NoTrade":
+        if d != today and status == "NoTrade" and d < retry_cutoff:
             continue
         pending_dates.append(d)
 
@@ -150,6 +162,7 @@ def run_minute_task(cfg):
     min_cfg = cfg.get("ingest_minute", {})
     start_date = min_cfg["start_date"]
     end_date = min_cfg.get("end_date") or datetime.now().strftime("%Y-%m-%d")
+    retry_notrade_days = int(cfg.get("ingest", {}).get("retry_notrade_days", 14))
     business_days = pd.date_range(start=start_date, end=end_date, freq="B")
     total = max(len(business_days) * max(len(stock_list), 1), 1)
 
@@ -199,6 +212,7 @@ def run_minute_task(cfg):
             start_date,
             end_date,
             api_name=MINUTE_API_NAME,
+            retry_notrade_days=retry_notrade_days,
         )
         if not pending_dates:
             continue
@@ -215,8 +229,11 @@ def run_minute_task(cfg):
                 continue
             is_today = d == datetime.now().strftime("%Y-%m-%d")
             if (not is_today) and status == "NoTrade":
-                p_bar.progress(min(count / total, 1.0))
-                continue
+                day = datetime.strptime(d, "%Y-%m-%d").date()
+                retry_cutoff = datetime.now().date() - timedelta(days=max(int(retry_notrade_days or 0), 0))
+                if day < retry_cutoff:
+                    p_bar.progress(min(count / total, 1.0))
+                    continue
 
             p_text.warning(f"🔍 偵測到分鐘級缺口：{d} | {sid}...")
             try:
