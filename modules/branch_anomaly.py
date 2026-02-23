@@ -6,8 +6,13 @@ from utility.branch_anomaly_detection import BranchAnomalyConfig, build_anomaly_
 
 
 COLUMN_LABELS = {
-    "date": "日期",
     "week": "週別",
+    "start_date": "起始日",
+    "end_date": "結束日",
+    "observed_days": "觀察天數",
+    "event_days": "異常事件天數",
+    "avg_score": "平均異常分數",
+    "peak_score": "區間最高分",
     "stock_id": "股票代號",
     "branch_id": "分點代號",
     "anomaly_score": "異常分數",
@@ -18,7 +23,6 @@ COLUMN_LABELS = {
     "flag_accumulation": "疑似吸籌",
     "flag_distribution": "疑似出貨",
     "events": "事件筆數",
-    "avg_score": "平均異常分數",
     "avg_vol_share": "平均成交占比",
 }
 
@@ -40,13 +44,15 @@ def _render_column_guide() -> None:
     with st.expander("欄位說明（如何解讀）", expanded=True):
         st.markdown(
             """
-            - **異常分數**：綜合分數（0~100），越高代表越偏離分點平常行為。
+            - **異常分數**：以區間平均（70%）+ 區間最高（30%）計算的綜合分數（0~100）。
             - **異常等級**：`一般 / 中度 / 高度`，可快速判斷是否要追蹤。
             - **淨買賣量 Z 分數(20日)**：分點淨買賣量相對過去 20 日的偏離程度；\
               正值偏買、負值偏賣，絕對值越大代表越異常。
             - **總成交量 Z 分數(20日)**：該分點總成交量相對過去 20 日是否放大。
             - **分點成交占比**：該分點占當日全股票分點成交量比例；越高代表集中度越高。
             - **疑似吸籌 / 疑似出貨**：系統規則旗標，表示是否符合連續偏買或偏賣特徵。
+            - **起始日 / 結束日**：此分點在本次設定區間內的觀察範圍。
+            - **觀察天數 / 異常事件天數**：分點出現資料的天數，以及觸發異常規則的天數。
             - **每週摘要**：看每週事件筆數、平均異常分數、平均成交占比，評估異常是否持續。
             """
         )
@@ -156,12 +162,13 @@ def show_branch_anomaly():
 
     anomaly_events, watchlist, weekly_report = build_anomaly_outputs(raw_df, detector_cfg)
 
-    st.success(f"完成：共偵測 {len(anomaly_events)} 筆分點日資料，追蹤名單 {len(watchlist)} 筆。")
+    st.success(f"完成：共彙整 {len(anomaly_events)} 個分點，追蹤名單 {len(watchlist)} 筆。")
     _render_column_guide()
 
     st.subheader("1) 異常事件排行榜")
     show_cols = [
-        "date", "stock_id", "branch_id", "anomaly_score", "anomaly_level",
+        "stock_id", "branch_id", "start_date", "end_date", "observed_days", "event_days",
+        "anomaly_score", "anomaly_level", "avg_score", "peak_score",
         "z_net_20", "z_gross_20", "vol_share", "flag_accumulation", "flag_distribution"
     ]
     st.dataframe(
