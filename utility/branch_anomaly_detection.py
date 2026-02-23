@@ -190,14 +190,44 @@ def build_anomaly_outputs(
     flagged = detect_rule_flags(with_baseline, cfg=cfg)
     scored = compute_anomaly_score(flagged)
 
-    anomaly_ranked_events = scored.sort_values(["date", "anomaly_score"], ascending=[False, False]).reset_index(drop=True)
+    interval_summary = (
+        scored.groupby(["stock_id", "branch_id"], as_index=False)
+        .agg(
+            start_date=("date", "min"),
+            end_date=("date", "max"),
+            observed_days=("date", "nunique"),
+            event_days=("rule_triggered", "sum"),
+            avg_score=("anomaly_score", "mean"),
+            peak_score=("anomaly_score", "max"),
+            z_net_20=("z_net_20", "mean"),
+            z_gross_20=("z_gross_20", "mean"),
+            vol_share=("vol_share", "mean"),
+            flag_accumulation=("flag_accumulation", "max"),
+            flag_distribution=("flag_distribution", "max"),
+        )
+        .reset_index(drop=True)
+    )
+
+    interval_summary["anomaly_score"] = (
+        interval_summary["avg_score"] * 0.7 + interval_summary["peak_score"] * 0.3
+    ).round(2)
+    interval_summary["anomaly_level"] = pd.cut(
+        interval_summary["anomaly_score"],
+        bins=[-np.inf, 60, 80, np.inf],
+        labels=["normal", "medium", "major"],
+    ).astype(str)
+
+    anomaly_ranked_events = interval_summary.sort_values(
+        ["anomaly_score", "event_days", "vol_share"], ascending=[False, False, False]
+    ).reset_index(drop=True)
 
     tradable_watchlist = anomaly_ranked_events.loc[
-        (anomaly_ranked_events["rule_triggered"]) & (anomaly_ranked_events["anomaly_score"] >= cfg.medium_score_threshold)
+        (anomaly_ranked_events["event_days"] >= 1)
+        & (anomaly_ranked_events["anomaly_score"] >= cfg.medium_score_threshold)
     ].copy()
 
     # weekly summary by stock and anomaly level
-    weekly = anomaly_ranked_events.copy()
+    weekly = scored.copy()
     weekly["week"] = pd.to_datetime(weekly["date"]).dt.to_period("W").dt.start_time
     weekly_validation_report = (
         weekly.groupby(["week", "stock_id", "anomaly_level"], as_index=False)
