@@ -1,6 +1,6 @@
 import streamlit as st
 # 匯入所有功能模組，包含新加入的 data_management
-from modules import data_browser, tech_analysis, branch_analysis, stock_health, data_management, prediction, fundamental_analysis 
+from modules import data_browser, tech_analysis, branch_analysis, stock_health, data_management, prediction, fundamental_analysis, branch_anomaly 
 ##--- 頁面配置 ---
 st.set_page_config(page_title="台股 AI 自動化分析平台", layout="wide")
 
@@ -12,6 +12,7 @@ main_menu = st.sidebar.radio(
         "📊 資料瀏覽器", 
         "📈 技術分析", 
         "📈 分點分析", 
+        "🚨 分點異常偵測", 
         "🏥 全方位籌碼診斷",
         "🔮 股價趨勢預測",
         "💎 基本面分析",
@@ -34,6 +35,9 @@ elif main_menu == "📈 分點分析":
 
 elif main_menu == "🏥 全方位籌碼診斷":    
     stock_health.show_stock_health()
+
+elif main_menu == "🚨 分點異常偵測":
+    branch_anomaly.show_branch_anomaly()
 
 elif main_menu == "⚙️ 資料同步管理":    
     # 呼叫管理中心，讓您選擇要執行的 Ingest 腳本
