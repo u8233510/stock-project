@@ -123,6 +123,11 @@ def detect_rule_flags(df: pd.DataFrame, cfg: BranchAnomalyConfig = BranchAnomaly
     _validate_columns(df, ["z_net_20", "z_gross_20", "vol_share", "net_vol", "avg_price", "close"])
     out = df.copy()
 
+    stock_day_net = out.groupby(["stock_id", "date"], as_index=False)["net_vol"].sum().rename(
+        columns={"net_vol": "stock_day_net_vol"}
+    )
+    out = out.merge(stock_day_net, on=["stock_id", "date"], how="left")
+
     out["flag_net"] = out["z_net_20"].abs() >= cfg.z_threshold
     out["flag_gross"] = out["z_gross_20"] >= cfg.gross_z_threshold
     out["flag_share"] = out["vol_share"] >= cfg.vol_share_threshold
@@ -134,6 +139,31 @@ def detect_rule_flags(df: pd.DataFrame, cfg: BranchAnomalyConfig = BranchAnomaly
         (out["z_net_20"] < -cfg.z_threshold)
         & (out["vol_share"] > cfg.vol_share_threshold)
         & (out["avg_price"] < out["close"])
+    )
+
+    # stealth flow: direction is persistent but does not show up as a dominant volume branch.
+    stealth_share_cap = cfg.vol_share_threshold * 0.8
+    out["flag_stealth_accumulation"] = (
+        (out["z_net_20"] >= max(cfg.z_threshold * 0.5, 1.5))
+        & (out["net_vol"] > 0)
+        & (out["vol_share"] <= stealth_share_cap)
+    )
+    out["flag_stealth_distribution"] = (
+        (out["z_net_20"] <= -max(cfg.z_threshold * 0.5, 1.5))
+        & (out["net_vol"] < 0)
+        & (out["vol_share"] <= stealth_share_cap)
+    )
+
+    # supply pattern: branch is persistently on the opposite side of market net flow.
+    out["flag_supply_to_market"] = (
+        (out["net_vol"] < 0)
+        & (out["stock_day_net_vol"] > 0)
+        & (out["vol_share"] >= cfg.vol_share_threshold * 0.5)
+    )
+    out["flag_absorb_from_market"] = (
+        (out["net_vol"] > 0)
+        & (out["stock_day_net_vol"] < 0)
+        & (out["vol_share"] >= cfg.vol_share_threshold * 0.5)
     )
 
     out["rule_hit_count"] = out[["flag_net", "flag_gross", "flag_share"]].sum(axis=1)
@@ -202,10 +232,39 @@ def build_anomaly_outputs(
             z_net_20=("z_net_20", "mean"),
             z_gross_20=("z_gross_20", "mean"),
             vol_share=("vol_share", "mean"),
+            net_vol_sum=("net_vol", "sum"),
+            gross_vol_sum=("gross_vol", "sum"),
+            buy_event_days=("net_vol", lambda s: int((s > 0).sum())),
+            sell_event_days=("net_vol", lambda s: int((s < 0).sum())),
             flag_accumulation=("flag_accumulation", "max"),
             flag_distribution=("flag_distribution", "max"),
+            stealth_accum_days=("flag_stealth_accumulation", "sum"),
+            stealth_dist_days=("flag_stealth_distribution", "sum"),
+            supply_to_market_days=("flag_supply_to_market", "sum"),
+            absorb_from_market_days=("flag_absorb_from_market", "sum"),
         )
         .reset_index(drop=True)
+    )
+
+    interval_summary["net_flow_ratio"] = _safe_div(interval_summary["net_vol_sum"], interval_summary["gross_vol_sum"])
+    interval_summary["dominant_action"] = np.select(
+        [
+            interval_summary["supply_to_market_days"] >= 2,
+            interval_summary["absorb_from_market_days"] >= 2,
+            interval_summary["stealth_accum_days"] >= 2,
+            interval_summary["stealth_dist_days"] >= 2,
+            interval_summary["net_flow_ratio"] >= 0.15,
+            interval_summary["net_flow_ratio"] <= -0.15,
+        ],
+        [
+            "供給籌碼",
+            "承接籌碼",
+            "偷偷進貨",
+            "偷偷在賣",
+            "偏買",
+            "偏賣",
+        ],
+        default="中性",
     )
 
     interval_summary["anomaly_score"] = (
@@ -224,6 +283,7 @@ def build_anomaly_outputs(
     tradable_watchlist = anomaly_ranked_events.loc[
         (anomaly_ranked_events["event_days"] >= 1)
         & (anomaly_ranked_events["anomaly_score"] >= cfg.medium_score_threshold)
+        & (anomaly_ranked_events["dominant_action"] != "中性")
     ].copy()
 
     # weekly summary by stock and anomaly level
