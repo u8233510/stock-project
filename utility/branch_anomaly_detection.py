@@ -291,8 +291,8 @@ def build_anomaly_outputs(
         & (anomaly_ranked_events["dominant_action"] != "中性")
     ].copy()
 
-    # weekly summary by stock and anomaly level
-    weekly = scored.copy()
+    # weekly summary by stock and anomaly level (only triggered events)
+    weekly = scored.loc[scored["rule_triggered"]].copy()
     weekly["week"] = pd.to_datetime(weekly["date"]).dt.to_period("W").dt.start_time
     weekly_validation_report = (
         weekly.groupby(["week", "stock_id", "anomaly_level"], as_index=False)
