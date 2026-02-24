@@ -32,6 +32,8 @@ COLUMN_LABELS = {
     "absorb_from_market_days": "承接籌碼天數",
     "events": "事件筆數",
     "avg_vol_share": "平均成交占比",
+    "adj_avg_score": "穩健異常分數",
+    "adj_avg_vol_share": "穩健成交占比",
 }
 
 LEVEL_LABELS = {
@@ -277,14 +279,44 @@ def show_branch_anomaly():
         )
 
     with tab4:
-        weekly_localized = _localize_table(weekly_report)
-        st.dataframe(
-            weekly_localized.style.format(
-                {
-                    "週別": lambda d: pd.to_datetime(d).strftime("%Y-%m-%d") if pd.notna(d) else "",
-                    "平均異常分數": "{:.3f}",
-                    "平均成交占比": "{:.2%}",
-                }
-            ),
-            use_container_width=True,
-        )
+        wc1, wc2, _ = st.columns([1.2, 1.2, 1.6])
+        with wc1:
+            min_weekly_events = st.slider("每週摘要最少事件筆數", min_value=1, max_value=20, value=2, step=1)
+        with wc2:
+            smoothing_k = st.slider("穩健分數平滑係數", min_value=1, max_value=20, value=5, step=1)
+
+        weekly_filtered = weekly_report[weekly_report["events"] >= min_weekly_events].copy()
+
+        if weekly_filtered.empty:
+            st.info("目前條件下沒有符合最少事件筆數的每週資料。")
+        else:
+            score_prior = float(weekly_report["avg_score"].mean()) if not weekly_report.empty else 0.0
+            vol_prior = float(weekly_report["avg_vol_share"].mean()) if not weekly_report.empty else 0.0
+            weekly_filtered["adj_avg_score"] = (
+                (weekly_filtered["avg_score"] * weekly_filtered["events"] + score_prior * smoothing_k)
+                / (weekly_filtered["events"] + smoothing_k)
+            )
+            weekly_filtered["adj_avg_vol_share"] = (
+                (weekly_filtered["avg_vol_share"] * weekly_filtered["events"] + vol_prior * smoothing_k)
+                / (weekly_filtered["events"] + smoothing_k)
+            )
+
+            weekly_filtered = weekly_filtered.sort_values(
+                ["week", "adj_avg_score", "events", "adj_avg_vol_share"],
+                ascending=[False, False, False, False],
+            )
+
+            weekly_localized = _localize_table(weekly_filtered)
+            st.caption("已套用穩健分數：事件筆數少的週別會被平滑，避免 1 筆極端值衝到最前面。")
+            st.dataframe(
+                weekly_localized.style.format(
+                    {
+                        "週別": lambda d: pd.to_datetime(d).strftime("%Y-%m-%d") if pd.notna(d) else "",
+                        "平均異常分數": "{:.3f}",
+                        "穩健異常分數": "{:.3f}",
+                        "平均成交占比": "{:.2%}",
+                        "穩健成交占比": "{:.2%}",
+                    }
+                ),
+                use_container_width=True,
+            )
