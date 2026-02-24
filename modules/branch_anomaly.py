@@ -277,7 +277,14 @@ def show_branch_anomaly():
         )
 
     with tab4:
+        weekly_localized = _localize_table(weekly_report)
         st.dataframe(
-            _localize_table(weekly_report).style.format({"avg_score": "{:.2f}", "avg_vol_share": "{:.2%}"}),
+            weekly_localized.style.format(
+                {
+                    "週別": lambda d: pd.to_datetime(d).strftime("%Y-%m-%d") if pd.notna(d) else "",
+                    "平均異常分數": "{:.3f}",
+                    "平均成交占比": "{:.2%}",
+                }
+            ),
             use_container_width=True,
         )
