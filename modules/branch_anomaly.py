@@ -51,17 +51,28 @@ def _localize_table(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _format_main_table(df: pd.DataFrame):
-    return _localize_table(df).style.format(
-        {
-            "anomaly_score": "{:.2f}",
-            "avg_score": "{:.2f}",
-            "peak_score": "{:.2f}",
-            "z_net_20": "{:.2f}",
-            "z_gross_20": "{:.2f}",
-            "vol_share": "{:.2%}",
-            "net_flow_ratio": "{:.2%}",
-        }
-    )
+    localized = _localize_table(df)
+    formatters = {
+        "異常分數": "{:.3f}",
+        "平均異常分數": "{:.3f}",
+        "區間最高分": "{:.3f}",
+        "淨買賣量 Z 分數(20日)": "{:.2f}",
+        "總成交量 Z 分數(20日)": "{:.2f}",
+        "分點成交占比": "{:.2%}",
+        "淨流向占比": "{:.2%}",
+    }
+    return localized.style.format({k: v for k, v in formatters.items() if k in localized.columns})
+
+
+def _format_weekly_table(df: pd.DataFrame):
+    localized = _localize_table(df.copy())
+    if "週別" in localized.columns:
+        localized["週別"] = pd.to_datetime(localized["週別"], errors="coerce").dt.strftime("%Y-%m-%d")
+    formatters = {
+        "平均異常分數": "{:.3f}",
+        "平均成交占比": "{:.2%}",
+    }
+    return localized.style.format({k: v for k, v in formatters.items() if k in localized.columns})
 
 
 def _render_column_guide() -> None:
@@ -234,8 +245,6 @@ def show_branch_anomaly():
         "buy_event_days",
         "sell_event_days",
         "vol_share",
-        "start_date",
-        "end_date",
     ]
 
     detail_cols = [
@@ -280,6 +289,6 @@ def show_branch_anomaly():
 
     with tab4:
         st.dataframe(
-            _localize_table(weekly_report).style.format({"avg_score": "{:.2f}", "avg_vol_share": "{:.2%}"}),
+            _format_weekly_table(weekly_report),
             use_container_width=True,
         )
