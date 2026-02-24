@@ -156,7 +156,13 @@ def _run_lightgbm_branch_forecast(conn, sid, current_price, main_force_cost, chi
         "concentration_5", "concentration_20", "concentration_60",
         "cost_gap_20",
     ]
+    ds = ds[(ds["close"] > 0) & (ds["avg_cost_20"] > 0)].copy()
+    ds = ds.replace([float("inf"), float("-inf")], pd.NA)
     model_ds = ds.dropna(subset=feature_cols + ["future_return_5d"]).copy()
+    model_ds["future_return_5d"] = pd.to_numeric(model_ds["future_return_5d"], errors="coerce")
+
+    # 避免極端異常值污染回歸，導致預測結果失真（例如 e+34%）。
+    model_ds = model_ds[model_ds["future_return_5d"].abs() <= 40]
 
     if len(model_ds) < 40:
         return {"status": "insufficient_data", "message": f"可用樣本僅 {len(model_ds)} 筆，至少需要 40 筆。"}
@@ -182,7 +188,8 @@ def _run_lightgbm_branch_forecast(conn, sid, current_price, main_force_cost, chi
     latest_row["avg_cost_20"] = main_force_cost
     latest_row["concentration_20"] = chip_concentration
     latest_row["cost_gap_20"] = ((current_price - main_force_cost) / main_force_cost) * 100 if main_force_cost else 0
-    forecast = float(model.predict(pd.DataFrame([latest_row[feature_cols]]))[0])
+    forecast_raw = float(model.predict(pd.DataFrame([latest_row[feature_cols]]))[0])
+    forecast = max(min(forecast_raw, 40.0), -40.0)
 
     return {
         "status": "ok",
@@ -191,6 +198,7 @@ def _run_lightgbm_branch_forecast(conn, sid, current_price, main_force_cost, chi
         "test_samples": int(len(test_df)),
         "mae": round(float(mae), 3),
         "pred_return_5d": round(forecast, 2),
+        "pred_return_5d_raw": round(forecast_raw, 2),
     }
 
 
@@ -294,12 +302,14 @@ def show_branch_analysis():
         with m2:
             cost_gap = round(((current_price - main_force_cost) / main_force_cost) * 100, 2) if main_force_cost > 0 else 0
             st.metric("目前價格位階", f"{cost_gap}%", delta=f"{cost_gap}%", delta_color="normal")
-        with m3: st.metric("買方籌碼集中度", f"{chip_concentration}%")
+        with m3:
+            st.metric("買方籌碼集中度", f"{chip_concentration:.2f}%")
+            st.caption("定義：前 N 大買超分點淨買超總和 / 全市場總買量。負值代表賣壓強於買盤。")
 
         lgbm_result = _run_lightgbm_branch_forecast(conn, sid, current_price, main_force_cost, chip_concentration)
         with st.expander("📈 LightGBM 分點訊號（未來 5 日）", expanded=True):
             if lgbm_result["status"] == "ok":
-                st.metric("預估 5 日報酬", f"{lgbm_result['pred_return_5d']}%")
+                st.metric("預估 5 日報酬", f"{lgbm_result['pred_return_5d']:.2f}%")
                 st.caption(
                     f"樣本數 {lgbm_result['samples']}（訓練 {lgbm_result['train_samples']} / 測試 {lgbm_result['test_samples']}），"
                     f"測試 MAE：{lgbm_result['mae']}"
