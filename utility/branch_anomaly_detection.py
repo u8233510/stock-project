@@ -220,6 +220,8 @@ def build_anomaly_outputs(
     flagged = detect_rule_flags(with_baseline, cfg=cfg)
     scored = compute_anomaly_score(flagged)
 
+    scored["event_score"] = scored["anomaly_score"].where(scored["rule_triggered"], np.nan)
+
     interval_summary = (
         scored.groupby(["stock_id", "branch_id"], as_index=False)
         .agg(
@@ -228,6 +230,7 @@ def build_anomaly_outputs(
             observed_days=("date", "nunique"),
             event_days=("rule_triggered", "sum"),
             avg_score=("anomaly_score", "mean"),
+            event_avg_score=("event_score", "mean"),
             peak_score=("anomaly_score", "max"),
             z_net_20=("z_net_20", "mean"),
             z_gross_20=("z_gross_20", "mean"),
@@ -267,8 +270,10 @@ def build_anomaly_outputs(
         default="中性",
     )
 
+    interval_summary["event_avg_score"] = interval_summary["event_avg_score"].fillna(interval_summary["avg_score"])
+
     interval_summary["anomaly_score"] = (
-        interval_summary["avg_score"] * 0.7 + interval_summary["peak_score"] * 0.3
+        interval_summary["event_avg_score"] * 0.7 + interval_summary["peak_score"] * 0.3
     ).round(2)
     interval_summary["anomaly_level"] = pd.cut(
         interval_summary["anomaly_score"],
