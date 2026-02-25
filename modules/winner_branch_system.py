@@ -482,6 +482,17 @@ def show_winner_branch_system():
         daily_alerts_display = alerts_df.merge(branch_lookup, on="branch_id", how="left")
         daily_alerts_display["branch_name"] = daily_alerts_display["branch_name"].fillna("-")
         daily_alerts_display["alert_level_desc"] = daily_alerts_display["alert_level"].map(ALERT_LEVEL_DESC).fillna("-")
+        preferred_order = [
+            "date",
+            "branch_id",
+            "branch_name",
+            "alert_level",
+            "alert_level_desc",
+            "reason",
+        ]
+        ordered_cols = [c for c in preferred_order if c in daily_alerts_display.columns]
+        remaining_cols = [c for c in daily_alerts_display.columns if c not in ordered_cols]
+        daily_alerts_display = daily_alerts_display[ordered_cols + remaining_cols]
         st.dataframe(_to_display_df(daily_alerts_display), use_container_width=True, hide_index=True)
 
         st.subheader("🧪 Strategy Candidates（集中度策略候選）")
