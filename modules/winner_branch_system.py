@@ -85,18 +85,15 @@ RATING_FOCUS_COLUMNS = [
 ]
 
 
-def _enable_bilingual_header_style() -> None:
-    st.markdown(
-        """
-        <style>
-        div[data-testid="stDataFrame"] div[role="columnheader"] {
-            white-space: pre-line !important;
-            line-height: 1.25 !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+def _to_bilingual_multiindex(columns: pd.Index) -> pd.MultiIndex:
+    tuples = []
+    for col in columns:
+        if isinstance(col, str) and "\n" in col:
+            zh, en = col.split("\n", 1)
+            tuples.append((zh.strip(), en.strip()))
+        else:
+            tuples.append((str(col), ""))
+    return pd.MultiIndex.from_tuples(tuples)
 
 
 def _to_display_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -109,7 +106,9 @@ def _to_display_df(df: pd.DataFrame) -> pd.DataFrame:
         parsed_date = pd.to_datetime(display_df["date"], errors="coerce")
         display_df["date"] = parsed_date.dt.strftime("%Y-%m-%d").where(parsed_date.notna(), display_df["date"])
 
-    return display_df.rename(columns={k: v for k, v in DISPLAY_COLUMN_MAP.items() if k in display_df.columns})
+    display_df = display_df.rename(columns={k: v for k, v in DISPLAY_COLUMN_MAP.items() if k in display_df.columns})
+    display_df.columns = _to_bilingual_multiindex(display_df.columns)
+    return display_df
 
 
 def _render_winner_rating_table(rating_df: pd.DataFrame, branch_lookup: pd.DataFrame):
