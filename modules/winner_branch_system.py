@@ -111,6 +111,21 @@ def _to_display_df(df: pd.DataFrame) -> pd.DataFrame:
     return display_df
 
 
+def _enable_bilingual_header_style() -> None:
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stDataFrame"] thead tr th {
+            white-space: pre-line !important;
+            line-height: 1.25 !important;
+            vertical-align: bottom !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _render_winner_rating_table(rating_df: pd.DataFrame, branch_lookup: pd.DataFrame):
     if rating_df.empty:
         st.info("目前沒有可顯示的分點評級資料。")
