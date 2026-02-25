@@ -8,41 +8,43 @@ from utility.winner_branch_ml import WinnerMLConfig
 
 
 DISPLAY_COLUMN_MAP = {
-    "stock_id": "股票代號 (Stock ID)",
-    "date": "日期 (Date)",
-    "branch_id": "分點代碼 (Branch ID)",
-    "hit_rate": "命中率 (Hit Rate)",
-    "avg_alpha": "平均超額報酬 (Average Alpha)",
-    "pnl_ratio": "盈虧比 (PnL Ratio)",
-    "sharpe": "夏普值 (Sharpe Ratio)",
-    "timing_score": "時機分數 (Timing Score)",
-    "holding_power": "持股續航力 (Holding Power)",
-    "risk_penalty": "風險懲罰 (Risk Penalty)",
-    "winner_rating": "贏家評分 (Winner Rating)",
-    "winner_type": "贏家類型 (Winner Type)",
-    "net_vol": "淨買賣超 (Net Volume)",
-    "vol_share": "成交量占比 (Volume Share)",
-    "alert_level": "警示等級 (Alert Level)",
-    "reason": "觸發原因 (Trigger Reason)",
-    "hhi": "HHI 集中度 (HHI Concentration)",
-    "entropy": "熵值 (Entropy)",
-    "hhi_delta_10": "HHI 10日變化 (10D HHI Delta)",
-    "price_compression": "價格壓縮度 (Price Compression)",
-    "rule_hhi_rise": "規則：HHI上升 (Rule: HHI Rise)",
-    "rule_compression": "規則：價格壓縮 (Rule: Price Compression)",
-    "strategy_candidate": "策略候選 (Strategy Candidate)",
-    "candidate_score": "候選分數 (Candidate Score)",
-    "label_positive": "正樣本標記 (Positive Label)",
-    "feature": "特徵 (Feature)",
-    "importance": "重要度 (Importance)",
-    "model_score": "模型分數 (Model Score)",
-    "model_signal": "模型訊號 (Model Signal)",
-    "candidate_rank": "候選排名 (Candidate Rank)",
+    "stock_id": "股票代號\nStock ID",
+    "date": "日期\nDate",
+    "branch_id": "分點代碼\nBranch ID",
+    "branch_name": "分點名稱\nBranch Name",
+    "hit_rate": "命中率\nHit Rate",
+    "avg_alpha": "平均超額報酬\nAverage Alpha",
+    "pnl_ratio": "盈虧比\nPnL Ratio",
+    "sharpe": "夏普值\nSharpe Ratio",
+    "timing_score": "時機分數\nTiming Score",
+    "holding_power": "持股續航力\nHolding Power",
+    "risk_penalty": "風險懲罰\nRisk Penalty",
+    "winner_rating": "贏家評分\nWinner Rating",
+    "winner_type": "贏家類型\nWinner Type",
+    "net_vol": "淨買賣超\nNet Volume",
+    "vol_share": "成交量占比\nVolume Share",
+    "alert_level": "警示等級\nAlert Level",
+    "reason": "觸發原因\nTrigger Reason",
+    "hhi": "HHI 集中度\nHHI Concentration",
+    "entropy": "熵值\nEntropy",
+    "hhi_delta_10": "HHI 10日變化\n10D HHI Delta",
+    "price_compression": "價格壓縮度\nPrice Compression",
+    "rule_hhi_rise": "規則：HHI上升\nRule: HHI Rise",
+    "rule_compression": "規則：價格壓縮\nRule: Price Compression",
+    "strategy_candidate": "策略候選\nStrategy Candidate",
+    "candidate_score": "候選分數\nCandidate Score",
+    "label_positive": "正樣本標記\nPositive Label",
+    "feature": "特徵\nFeature",
+    "importance": "重要度\nImportance",
+    "model_score": "模型分數\nModel Score",
+    "model_signal": "模型訊號\nModel Signal",
+    "candidate_rank": "候選排名\nCandidate Rank",
 }
 
 RATING_FOCUS_COLUMNS = [
     "date",
     "branch_id",
+    "branch_name",
     "winner_type",
     "winner_rating",
     "hit_rate",
@@ -59,41 +61,57 @@ def _to_display_df(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns={k: v for k, v in DISPLAY_COLUMN_MAP.items() if k in df.columns})
 
 
-def _render_winner_rating_table(rating_df: pd.DataFrame):
-    st.caption("先看摘要欄位，再針對單一分點展開完整參數，可大幅降低閱讀負擔。")
-
+def _render_winner_rating_table(rating_df: pd.DataFrame, branch_lookup: pd.DataFrame):
     if rating_df.empty:
         st.info("目前沒有可顯示的分點評級資料。")
         return
 
-    summary_cols = [c for c in RATING_FOCUS_COLUMNS if c in rating_df.columns]
-    summary_df = rating_df[summary_cols].copy() if summary_cols else rating_df.copy()
+    merged = rating_df.merge(branch_lookup, on="branch_id", how="left")
+    merged["branch_name"] = merged["branch_name"].fillna("-")
 
-    if not summary_df.empty and len(summary_df.columns) > 0:
-        sort_target = "winner_rating" if "winner_rating" in summary_df.columns else summary_df.columns[-1]
-        sort_desc = st.toggle("摘要表依評分由高到低排序", value=True)
-        summary_df = summary_df.sort_values(sort_target, ascending=not sort_desc)
+    sort_cols = [
+        "winner_rating",
+        "hit_rate",
+        "avg_alpha",
+        "pnl_ratio",
+        "sharpe",
+        "timing_score",
+        "holding_power",
+    ]
+    available_sort_cols = [c for c in sort_cols if c in merged.columns]
+    if available_sort_cols:
+        merged = merged.sort_values(available_sort_cols, ascending=[False] * len(available_sort_cols))
 
-    max_rows = min(200, len(summary_df))
-    step = 10 if max_rows >= 10 else 1
-    default_rows = min(30, max_rows)
-    top_k = st.slider("摘要表顯示筆數", min_value=1, max_value=max_rows, value=default_rows, step=step)
+    st.caption("同一張表整合全部重點欄位，可依 Rating 篩選要顯示的分點。")
 
-    st.markdown("**快速摘要（建議先看）**")
-    st.dataframe(_to_display_df(summary_df.head(top_k)), use_container_width=True, hide_index=True)
+    filter_mode = st.radio(
+        "顯示分點篩選方式",
+        options=["全部分點", "Top N（依 Rating）", "Rating 門檻"],
+        horizontal=True,
+    )
 
-    if "branch_id" in rating_df.columns:
-        branch_options = ["全部分點"] + sorted(str(v) for v in rating_df["branch_id"].dropna().unique())
-        selected_branch = st.selectbox("聚焦單一分點（可對照完整參數）", branch_options)
-        if selected_branch == "全部分點":
-            detail_df = rating_df
-        else:
-            detail_df = rating_df[rating_df["branch_id"].astype(str) == selected_branch]
+    if filter_mode == "Top N（依 Rating）":
+        max_rows = max(1, len(merged))
+        top_n = st.slider("顯示前 N 名分點", min_value=1, max_value=max_rows, value=min(20, max_rows), step=1)
+        display_df = merged.head(top_n)
+    elif filter_mode == "Rating 門檻":
+        threshold = st.slider("最低 Winner Rating", min_value=0.0, max_value=100.0, value=60.0, step=0.5)
+        display_df = merged[merged["winner_rating"] >= threshold]
     else:
-        detail_df = rating_df
+        display_df = merged
 
-    with st.expander("查看完整參數（進階分析）"):
-        st.dataframe(_to_display_df(detail_df), use_container_width=True, hide_index=True)
+    selected_branches = st.multiselect(
+        "進一步指定要顯示的分點（可複選）",
+        options=[str(v) for v in display_df["branch_id"].astype(str).unique()],
+        default=[],
+        help="不選則顯示篩選後的全部分點。",
+    )
+    if selected_branches:
+        display_df = display_df[display_df["branch_id"].astype(str).isin(selected_branches)]
+
+    summary_cols = [c for c in RATING_FOCUS_COLUMNS if c in display_df.columns]
+    final_df = display_df[summary_cols].copy() if summary_cols else display_df.copy()
+    st.dataframe(_to_display_df(final_df), use_container_width=True, hide_index=True)
 
 
 def _load_branch_raw(conn, sid: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -102,6 +120,7 @@ def _load_branch_raw(conn, sid: str, start_date: str, end_date: str) -> pd.DataF
         b.stock_id,
         b.date,
         b.securities_trader_id AS branch_id,
+        b.securities_trader AS branch_name,
         b.price,
         b.buy,
         b.sell,
@@ -169,6 +188,14 @@ def show_winner_branch_system():
     top_n = st.slider("Top N 贏家分點 (Top N Winner Branches)", min_value=5, max_value=50, value=20, step=1)
 
     if st.button("🚀 執行需求1：贏家分點追蹤 (Run Requirement 1)", use_container_width=True):
+        branch_lookup = (
+            raw_df[["branch_id", "branch_name"]]
+            .dropna(subset=["branch_id"])
+            .astype({"branch_id": str})
+            .drop_duplicates(subset=["branch_id"], keep="last")
+        )
+        branch_lookup["branch_id"] = branch_lookup["branch_id"].astype(str)
+
         chip = ChipStrategyAI.from_dataframe(
             raw_df,
             start_date=start_d,
@@ -176,9 +203,10 @@ def show_winner_branch_system():
             config=ChipStrategyConfig(winner_cfg=wb_cfg),
         )
         track = chip.track_winner_branches(top_n=top_n)
+        track["winner_rating"]["branch_id"] = track["winner_rating"]["branch_id"].astype(str)
 
         st.subheader("🏆 Winner Rating（分點評級）")
-        _render_winner_rating_table(track["winner_rating"])
+        _render_winner_rating_table(track["winner_rating"], branch_lookup)
 
         st.subheader("🔔 Daily Alerts（A/B/C）")
         st.dataframe(_to_display_df(track["daily_alerts"]), use_container_width=True, hide_index=True)
