@@ -250,3 +250,50 @@ def optimize_trade_params(
     if out.empty:
         return out
     return out.sort_values(["expectancy", "avg_return"], ascending=[False, False]).reset_index(drop=True)
+
+
+def build_today_candidate_list(
+    ds: pd.DataFrame,
+    model_result: dict,
+    feature_cols: list[str] | None = None,
+    score_threshold: float = 0.55,
+    top_n: int = 20,
+) -> pd.DataFrame:
+    """Convert model scores into a latest-date candidate list.
+
+    Returns one row per stock on the latest available date with model score and signal.
+    """
+    if ds.empty:
+        return pd.DataFrame()
+    if model_result.get("status") != "ok" or "model" not in model_result:
+        return pd.DataFrame()
+
+    if feature_cols is None:
+        feature_cols = [
+            "hhi",
+            "entropy",
+            "avg_buy_cost",
+            "cost_gap",
+            "net_buy_strength",
+            "buy_continuity",
+            "retail_exit_ratio",
+        ]
+
+    model = model_result["model"]
+    score = model.predict_proba(ds[feature_cols])[:, 1]
+    out = ds[["stock_id", "date", "close"] + feature_cols].copy()
+    out["model_score"] = score
+    out["model_signal"] = (out["model_score"] >= score_threshold).astype(int)
+
+    # Keep latest observation per stock as "today" candidate board
+    out["date"] = pd.to_datetime(out["date"])
+    out = out.sort_values(["stock_id", "date"]).groupby("stock_id", as_index=False).tail(1)
+    out = out.sort_values("model_score", ascending=False).reset_index(drop=True)
+
+    picked = out[out["model_signal"] == 1].head(top_n).copy()
+    if picked.empty:
+        return picked
+
+    picked["candidate_rank"] = range(1, len(picked) + 1)
+    cols = ["candidate_rank", "stock_id", "date", "close", "model_score", "model_signal"] + feature_cols
+    return picked[cols]

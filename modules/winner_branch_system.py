@@ -34,7 +34,38 @@ DISPLAY_COLUMN_MAP = {
     "candidate_score": "候選分數",
     "label_positive": "正樣本標記",
     "feature": "特徵",
-    "importance": "重要度",
+    "importance": "重要度 (importance)",
+    "model_score": "模型分數",
+    "model_signal": "模型訊號",
+    "candidate_rank": "候選排名",
+    "avg_buy_cost": "平均買進成本 (avg_buy_cost)",
+    "entropy": "分散度 (entropy)",
+    "hhi": "集中度 (hhi)",
+    "cost_gap": "成本價差 (cost_gap)",
+    "net_buy_strength": "淨買強度 (net_buy_strength)",
+    "buy_continuity": "買超連續性 (buy_continuity)",
+    "retail_exit_ratio": "散戶退場比率 (retail_exit_ratio)",
+    "split_date": "切分日期 (split_date)",
+    "accuracy": "整體正確率 (accuracy)",
+    "precision": "命中率 (precision)",
+    "recall": "抓到率 (recall)",
+    "hold_days": "持有天數 (hold_days)",
+    "stop_loss": "停損幅度 (stop_loss)",
+    "sample_size": "樣本數 (sample_size)",
+    "win_rate": "勝率 (win_rate)",
+    "avg_return": "平均報酬 (avg_return)",
+    "expectancy": "期望值 (expectancy)",
+}
+
+
+FEATURE_NAME_MAP = {
+    "avg_buy_cost": "平均買進成本 (avg_buy_cost)",
+    "entropy": "分散度 (entropy)",
+    "hhi": "集中度 (hhi)",
+    "cost_gap": "成本價差 (cost_gap)",
+    "net_buy_strength": "淨買強度 (net_buy_strength)",
+    "buy_continuity": "買超連續性 (buy_continuity)",
+    "retail_exit_ratio": "散戶退場比率 (retail_exit_ratio)",
 }
 
 
@@ -186,22 +217,35 @@ def show_winner_branch_system():
         train_result = mine["model_result"]
         if train_result.get("status") == "ok":
             st.success("XGBoost 訓練完成")
-            st.write(
-                {
-                    "split_date": train_result["split_date"],
-                    "accuracy": train_result["accuracy"],
-                    "precision": train_result["precision"],
-                    "recall": train_result["recall"],
-                }
-            )
+            metrics = {
+                "split_date": train_result["split_date"],
+                "accuracy": train_result["accuracy"],
+                "precision": train_result["precision"],
+                "recall": train_result["recall"],
+            }
+            st.write(_to_display_df(pd.DataFrame([metrics])))
             fi = pd.DataFrame(
                 [{"feature": k, "importance": v} for k, v in train_result["feature_importance"].items()]
             ).sort_values("importance", ascending=False)
+            fi["feature"] = fi["feature"].map(lambda x: FEATURE_NAME_MAP.get(x, x))
             st.dataframe(_to_display_df(fi), use_container_width=True, hide_index=True)
         else:
             st.warning(f"模型訓練略過：{train_result.get('message', train_result.get('status'))}")
 
         st.markdown("**持有天數 / 停損參數掃描（proxy backtest）**")
         st.dataframe(_to_display_df(mine["param_scan"]), use_container_width=True, hide_index=True)
+
+        st.markdown("**📌 今日候選股清單（模型分數轉訊號）**")
+        today_candidates = mine.get("today_candidates", pd.DataFrame())
+        if today_candidates.empty:
+            st.info("目前沒有達到模型門檻的候選股（可嘗試調整正樣本參數後重跑）。")
+        else:
+            st.dataframe(_to_display_df(today_candidates), use_container_width=True, hide_index=True)
+            st.download_button(
+                "📥 下載今日候選股 CSV",
+                today_candidates.to_csv(index=False).encode("utf-8-sig"),
+                f"{sid}_today_model_candidates.csv",
+                "text/csv",
+            )
 
     conn.close()
