@@ -35,6 +35,9 @@ DISPLAY_COLUMN_MAP = {
     "label_positive": "正樣本標記",
     "feature": "特徵",
     "importance": "重要度",
+    "model_score": "模型分數",
+    "model_signal": "模型訊號",
+    "candidate_rank": "候選排名",
 }
 
 
@@ -203,5 +206,18 @@ def show_winner_branch_system():
 
         st.markdown("**持有天數 / 停損參數掃描（proxy backtest）**")
         st.dataframe(_to_display_df(mine["param_scan"]), use_container_width=True, hide_index=True)
+
+        st.markdown("**📌 今日候選股清單（模型分數轉訊號）**")
+        today_candidates = mine.get("today_candidates", pd.DataFrame())
+        if today_candidates.empty:
+            st.info("目前沒有達到模型門檻的候選股（可嘗試調整正樣本參數後重跑）。")
+        else:
+            st.dataframe(_to_display_df(today_candidates), use_container_width=True, hide_index=True)
+            st.download_button(
+                "📥 下載今日候選股 CSV",
+                today_candidates.to_csv(index=False).encode("utf-8-sig"),
+                f"{sid}_today_model_candidates.csv",
+                "text/csv",
+            )
 
     conn.close()
