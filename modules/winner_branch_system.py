@@ -178,6 +178,7 @@ def _render_winner_rating_table(rating_df: pd.DataFrame, branch_lookup: pd.DataF
 
     summary_cols = [c for c in RATING_FOCUS_COLUMNS if c in display_df.columns]
     final_df = display_df[summary_cols].copy() if summary_cols else display_df.copy()
+    _enable_bilingual_header_style()
     st.dataframe(_to_display_df(final_df), use_container_width=True, hide_index=True)
 
 
