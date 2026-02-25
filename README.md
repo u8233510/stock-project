@@ -486,7 +486,7 @@ streamlit run app.py
 
 ## `ChipStrategyAI` 使用方式（兩個需求分開）
 
-在 `app.py` 側邊欄已新增入口：**`🧠 ChipStrategyAI（CSV）`**。
+已整合到既有入口：**`🧠 AI 贏家分點追蹤`**（資料來源為資料庫）。
 
 你提的其實是 **2 個獨立需求**，`ChipStrategyAI` 已對應成兩條流程：
 
@@ -498,8 +498,8 @@ streamlit run app.py
 ```python
 from utility.chip_strategy_ai import ChipStrategyAI
 
-ai = ChipStrategyAI(
-    filepath="stock_details.csv",
+ai = ChipStrategyAI.from_dataframe(
+    raw_df_from_db,
     start_date="2024-01-01",
     end_date="2024-12-31",
 )
@@ -529,7 +529,8 @@ print(daily_alerts.head())
 ```python
 from utility.chip_strategy_ai import ChipStrategyAI
 
-ai = ChipStrategyAI(filepath="stock_details.csv")
+# 實務上建議從資料庫查詢後 DataFrame 建立
+ai = ChipStrategyAI.from_dataframe(raw_df_from_db)
 
 mine = ai.mine_trading_strategies(
     start_date="2024-01-01",
