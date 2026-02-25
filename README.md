@@ -483,3 +483,97 @@ streamlit run app.py
   - 做持有天數、停損比例參數掃描（proxy backtest）
 
 本專案已提供第二階段工具：`utility/winner_branch_ml.py`，並整合在 `🧠 AI 贏家分點追蹤` 頁面中可直接產生訓練資料與嘗試訓練。
+
+## `ChipStrategyAI` 使用方式（兩個需求分開）
+
+已整合到既有入口：**`🧠 AI 贏家分點追蹤`**（資料來源為資料庫）。
+
+你提的其實是 **2 個獨立需求**，`ChipStrategyAI` 已對應成兩條流程：
+
+1. **贏家分點自動化追蹤**（Winner Tracking）
+2. **AI 挖掘新交易策略**（Strategy Mining）
+
+### 需求 1：自動化追蹤特定贏家分點
+
+```python
+from utility.chip_strategy_ai import ChipStrategyAI
+
+ai = ChipStrategyAI.from_dataframe(
+    raw_df_from_db,
+    start_date="2024-01-01",
+    end_date="2024-12-31",
+)
+
+track = ai.track_winner_branches(top_n=20)
+
+# 你最常用的輸出
+winner_rating = track["winner_rating"]
+daily_alerts = track["daily_alerts"]
+top_winners = track["top_winners"]
+
+print(top_winners[["stock_id", "branch_id", "winner_rating"]].head())
+print(daily_alerts.head())
+```
+
+`track_winner_branches()` 一次回傳：
+- `winner_rating`
+- `daily_alerts`
+- `concentration`
+- `strategy_candidates`
+- `top_winners`
+
+---
+
+### 需求 2：AI 從海量資料挖掘新交易策略
+
+```python
+from utility.chip_strategy_ai import ChipStrategyAI
+
+# 實務上建議從資料庫查詢後 DataFrame 建立
+ai = ChipStrategyAI.from_dataframe(raw_df_from_db)
+
+mine = ai.mine_trading_strategies(
+    start_date="2024-01-01",
+    end_date="2024-12-31",
+)
+
+dataset = mine["dataset"]
+model_result = mine["model_result"]
+param_scan = mine["param_scan"]
+
+print(model_result)
+print(param_scan.head())
+```
+
+`mine_trading_strategies()` 一次完成：
+1. 建立訓練資料集
+2. 訓練分類模型
+3. 做持有天數 / 停損參數掃描
+
+---
+
+### 日期區間（兩條流程都支援）
+
+- 建構子 `start_date/end_date`：設定全域預設。
+- 方法參數 `start_date/end_date`：單次覆蓋。
+
+```python
+track_q1 = ai.track_winner_branches(start_date="2024-01-01", end_date="2024-03-31")
+mine_q2 = ai.mine_trading_strategies(start_date="2024-04-01", end_date="2024-06-30")
+```
+
+### 輸入欄位需求（CSV）
+
+至少要有：
+
+- `日期`
+- `分點名稱`
+- `買進張數`
+- `賣出張數`
+- `成交均價`
+
+可選：
+
+- `股票代號` 或 `stock_id`（若沒有，會自動標記 `UNKNOWN`）
+- `收盤價`（若沒有，會以 `成交均價` 代替）
+
