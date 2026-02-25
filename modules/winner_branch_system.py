@@ -8,7 +8,52 @@ from utility.winner_branch_ml import (
     build_phase2_training_dataset,
     train_xgboost_classifier,
     optimize_trade_params,
+    build_winner_list_and_daily_features,
 )
+
+
+DISPLAY_COLUMN_MAP = {
+    "stock_id": "股票代號",
+    "date": "日期",
+    "branch_id": "分點代碼",
+    "hit_rate": "命中率",
+    "avg_alpha": "平均超額報酬",
+    "pnl_ratio": "盈虧比",
+    "sharpe": "夏普值",
+    "timing_score": "時機分數",
+    "holding_power": "持股續航力",
+    "risk_penalty": "風險懲罰",
+    "winner_rating": "贏家評分",
+    "winner_type": "贏家類型",
+    "net_vol": "淨買賣超",
+    "vol_share": "成交量占比",
+    "alert_level": "警示等級",
+    "reason": "觸發原因",
+    "hhi": "HHI 集中度",
+    "entropy": "熵值",
+    "hhi_delta_10": "HHI 10日變化",
+    "price_compression": "價格壓縮度",
+    "rule_hhi_rise": "規則：HHI上升",
+    "rule_compression": "規則：價格壓縮",
+    "strategy_candidate": "策略候選",
+    "candidate_score": "候選分數",
+    "label_positive": "正樣本標記",
+    "feature": "特徵",
+    "importance": "重要度",
+    "net_amount": "淨買超金額",
+    "trade_days": "交易天數",
+    "net_vol_std": "買賣波動",
+    "avg_price_day": "當日均價",
+    "winner_participation": "贏家參與度",
+    "chip_concentration": "籌碼集中度",
+    "winner_sync_count": "贏家同步數",
+    "future_ret_5": "未來5日漲幅",
+    "target_5d_up": "5日上漲目標",
+}
+
+
+def _to_display_df(df: pd.DataFrame) -> pd.DataFrame:
+    return df.rename(columns={k: v for k, v in DISPLAY_COLUMN_MAP.items() if k in df.columns})
 
 
 def _load_branch_raw(conn, sid: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -87,20 +132,42 @@ def show_winner_branch_system():
             winner_rating, daily_alerts, concentration, strategy_candidates = build_winner_branch_outputs(raw_df, cfg=wb_cfg)
 
         st.subheader("🏆 Winner Rating（分點評級）")
-        st.dataframe(winner_rating, use_container_width=True, hide_index=True)
+        st.dataframe(_to_display_df(winner_rating), use_container_width=True, hide_index=True)
 
         st.subheader("🔔 Daily Alerts（A/B/C）")
-        st.dataframe(daily_alerts, use_container_width=True, hide_index=True)
+        st.dataframe(_to_display_df(daily_alerts), use_container_width=True, hide_index=True)
 
         st.subheader("🧪 Strategy Candidates（集中度策略候選）")
         if "strategy_candidate" in strategy_candidates.columns:
             cand = strategy_candidates[strategy_candidates["strategy_candidate"] == True]
         else:
             cand = strategy_candidates
-        st.dataframe(cand, use_container_width=True, hide_index=True)
+        st.dataframe(_to_display_df(cand), use_container_width=True, hide_index=True)
 
         with st.expander("查看 Concentration Features 原始輸出"):
-            st.dataframe(concentration, use_container_width=True, hide_index=True)
+            st.dataframe(_to_display_df(concentration), use_container_width=True, hide_index=True)
+
+        easy_winners, easy_daily = build_winner_list_and_daily_features(raw_df)
+        st.subheader("📌 易懂版：核心贏家追蹤清單")
+        st.caption("用分點累積淨買超金額找出前 20 名核心分點，方便你先決定每天要盯誰。")
+        st.dataframe(_to_display_df(easy_winners), use_container_width=True, hide_index=True)
+
+        st.subheader("📌 易懂版：每日決策觀察表")
+        st.caption("重點看贏家參與度、籌碼集中度、贏家同步數，判斷今天是觀察、續抱，還是提高警戒。")
+        st.dataframe(_to_display_df(easy_daily.tail(120)), use_container_width=True, hide_index=True)
+
+        st.download_button(
+            "📥 下載核心贏家清單 CSV",
+            easy_winners.to_csv(index=False).encode("utf-8-sig"),
+            f"{sid}_easy_winner_list.csv",
+            "text/csv",
+        )
+        st.download_button(
+            "📥 下載每日決策觀察表 CSV",
+            easy_daily.to_csv(index=False).encode("utf-8-sig"),
+            f"{sid}_easy_daily_features.csv",
+            "text/csv",
+        )
 
         st.download_button(
             "📥 下載 Winner Rating CSV",
@@ -135,7 +202,7 @@ def show_winner_branch_system():
             ml_cfg = WinnerMLConfig(lookahead_days=lookahead_days, rally_threshold=rally_threshold)
             train_ds = build_phase2_training_dataset(raw_df2, cfg=ml_cfg)
             st.markdown("**訓練資料集（含 label_positive）**")
-            st.dataframe(train_ds.head(200), use_container_width=True, hide_index=True)
+            st.dataframe(_to_display_df(train_ds.head(200)), use_container_width=True, hide_index=True)
 
             positive_rate = float(train_ds["label_positive"].mean()) if not train_ds.empty else 0.0
             st.info(f"樣本數: {len(train_ds)}，Positive 比例: {positive_rate:.2%}")
@@ -159,12 +226,12 @@ def show_winner_branch_system():
                 fi = pd.DataFrame(
                     [{"feature": k, "importance": v} for k, v in train_result["feature_importance"].items()]
                 ).sort_values("importance", ascending=False)
-                st.dataframe(fi, use_container_width=True, hide_index=True)
+                st.dataframe(_to_display_df(fi), use_container_width=True, hide_index=True)
             else:
                 st.warning(f"模型訓練略過：{train_result.get('message', train_result.get('status'))}")
 
             opt = optimize_trade_params(train_ds, signal_col="label_positive")
             st.markdown("**持有天數 / 停損參數掃描（proxy backtest）**")
-            st.dataframe(opt, use_container_width=True, hide_index=True)
+            st.dataframe(_to_display_df(opt), use_container_width=True, hide_index=True)
 
     conn.close()

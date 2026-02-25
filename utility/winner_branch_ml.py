@@ -207,6 +207,70 @@ def train_xgboost_classifier(
     }
 
 
+
+def build_winner_list_and_daily_features(
+    raw_df: pd.DataFrame,
+    top_n: int = 20,
+    lookahead_days: int = 5,
+    target_return: float = 0.03,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build easy-to-read winner list and daily feature table.
+
+    This follows a practical flow:
+    1) identify winner branches by cumulative net amount
+    2) build daily AI feature matrix for strategy observation
+    """
+    _validate_columns(raw_df, REQUIRED_COLUMNS)
+
+    x = raw_df.copy()
+    x["date"] = pd.to_datetime(x["date"])
+    x = x.sort_values(["date", "branch_id"]).reset_index(drop=True)
+
+    x["net_vol"] = x["buy"] - x["sell"]
+    x["net_amount"] = x["net_vol"] * x["price"] * 1000
+
+    winner_perf = (
+        x.groupby("branch_id", as_index=False)
+        .agg(
+            net_amount=("net_amount", "sum"),
+            trade_days=("date", "nunique"),
+            net_vol_std=("net_vol", "std"),
+        )
+        .sort_values("net_amount", ascending=False)
+        .head(top_n)
+        .reset_index(drop=True)
+    )
+
+    top_winner_ids = set(winner_perf["branch_id"].astype(str).tolist())
+
+    day = x.groupby("date", as_index=False).agg(avg_price_day=("price", "mean"))
+
+    def _winner_participation(g: pd.DataFrame) -> float:
+        winner_buy = g[g["branch_id"].astype(str).isin(top_winner_ids)]["net_vol"].sum()
+        total_buy = g["buy"].sum()
+        return float(winner_buy / total_buy) if total_buy > 0 else 0.0
+
+    def _chip_concentration(g: pd.DataFrame) -> float:
+        total_buy = float(g["buy"].sum())
+        if total_buy <= 0:
+            return 0.0
+        return float((g["buy"] ** 2).sum() / (total_buy**2))
+
+    def _winner_sync_count(g: pd.DataFrame) -> int:
+        m = g["branch_id"].astype(str).isin(top_winner_ids) & (g["net_vol"] > 0)
+        return int(m.sum())
+
+    day = day.set_index("date")
+    day["winner_participation"] = x.groupby("date").apply(_winner_participation)
+    day["chip_concentration"] = x.groupby("date").apply(_chip_concentration)
+    day["winner_sync_count"] = x.groupby("date").apply(_winner_sync_count)
+    day = day.reset_index().sort_values("date").reset_index(drop=True)
+
+    day["future_ret_5"] = day["avg_price_day"].shift(-lookahead_days) / day["avg_price_day"] - 1.0
+    day["target_5d_up"] = (day["future_ret_5"] > target_return).astype(int)
+
+    return winner_perf, day.dropna(subset=["future_ret_5"]).reset_index(drop=True)
+
 def optimize_trade_params(
     ds: pd.DataFrame,
     signal_col: str = "label_positive",
