@@ -40,9 +40,60 @@ DISPLAY_COLUMN_MAP = {
     "candidate_rank": "候選排名 (Candidate Rank)",
 }
 
+RATING_FOCUS_COLUMNS = [
+    "date",
+    "branch_id",
+    "winner_type",
+    "winner_rating",
+    "hit_rate",
+    "avg_alpha",
+    "pnl_ratio",
+    "sharpe",
+    "timing_score",
+    "holding_power",
+    "risk_penalty",
+]
+
 
 def _to_display_df(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns={k: v for k, v in DISPLAY_COLUMN_MAP.items() if k in df.columns})
+
+
+def _render_winner_rating_table(rating_df: pd.DataFrame):
+    st.caption("先看摘要欄位，再針對單一分點展開完整參數，可大幅降低閱讀負擔。")
+
+    if rating_df.empty:
+        st.info("目前沒有可顯示的分點評級資料。")
+        return
+
+    summary_cols = [c for c in RATING_FOCUS_COLUMNS if c in rating_df.columns]
+    summary_df = rating_df[summary_cols].copy() if summary_cols else rating_df.copy()
+
+    if not summary_df.empty and len(summary_df.columns) > 0:
+        sort_target = "winner_rating" if "winner_rating" in summary_df.columns else summary_df.columns[-1]
+        sort_desc = st.toggle("摘要表依評分由高到低排序", value=True)
+        summary_df = summary_df.sort_values(sort_target, ascending=not sort_desc)
+
+    max_rows = min(200, len(summary_df))
+    step = 10 if max_rows >= 10 else 1
+    default_rows = min(30, max_rows)
+    top_k = st.slider("摘要表顯示筆數", min_value=1, max_value=max_rows, value=default_rows, step=step)
+
+    st.markdown("**快速摘要（建議先看）**")
+    st.dataframe(_to_display_df(summary_df.head(top_k)), use_container_width=True, hide_index=True)
+
+    if "branch_id" in rating_df.columns:
+        branch_options = ["全部分點"] + sorted(str(v) for v in rating_df["branch_id"].dropna().unique())
+        selected_branch = st.selectbox("聚焦單一分點（可對照完整參數）", branch_options)
+        if selected_branch == "全部分點":
+            detail_df = rating_df
+        else:
+            detail_df = rating_df[rating_df["branch_id"].astype(str) == selected_branch]
+    else:
+        detail_df = rating_df
+
+    with st.expander("查看完整參數（進階分析）"):
+        st.dataframe(_to_display_df(detail_df), use_container_width=True, hide_index=True)
 
 
 def _load_branch_raw(conn, sid: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -127,7 +178,7 @@ def show_winner_branch_system():
         track = chip.track_winner_branches(top_n=top_n)
 
         st.subheader("🏆 Winner Rating（分點評級）")
-        st.dataframe(_to_display_df(track["winner_rating"]), use_container_width=True, hide_index=True)
+        _render_winner_rating_table(track["winner_rating"])
 
         st.subheader("🔔 Daily Alerts（A/B/C）")
         st.dataframe(_to_display_df(track["daily_alerts"]), use_container_width=True, hide_index=True)
