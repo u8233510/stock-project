@@ -1,6 +1,6 @@
 import streamlit as st
 # 匯入所有功能模組，包含新加入的 data_management
-from modules import data_browser, tech_analysis, branch_analysis, stock_health, data_management, prediction, fundamental_analysis, branch_anomaly, winner_branch_system
+from modules import data_browser, tech_analysis, branch_analysis, stock_health, data_management, prediction, fundamental_analysis, branch_anomaly, winner_branch_system, chip_strategy_ai
 ##--- 頁面配置 ---
 st.set_page_config(page_title="台股 AI 自動化分析平台", layout="wide")
 
@@ -14,6 +14,7 @@ main_menu = st.sidebar.radio(
         "📈 分點分析",
         "🚨 分點異常偵測",
         "🧠 AI 贏家分點追蹤",
+        "🧠 ChipStrategyAI（CSV）",
         "🏥 全方位籌碼診斷",
         "🔮 股價趨勢預測",
         "💎 基本面分析",
@@ -42,6 +43,9 @@ elif main_menu == "🚨 分點異常偵測":
 
 elif main_menu == "🧠 AI 贏家分點追蹤":
     winner_branch_system.show_winner_branch_system()
+
+elif main_menu == "🧠 ChipStrategyAI（CSV）":
+    chip_strategy_ai.show_chip_strategy_ai()
 
 elif main_menu == "⚙️ 資料同步管理":
     # 呼叫管理中心，讓您選擇要執行的 Ingest 腳本
