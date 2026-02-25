@@ -167,7 +167,7 @@ def _compute_winner_rating(branch_daily: pd.DataFrame, cfg: WinnerBranchConfig) 
     return out.sort_values(["winner_rating", "stock_id"], ascending=[False, True]).reset_index(drop=True)
 
 
-def _compute_concentration_features(branch_daily: pd.DataFrame) -> pd.DataFrame:
+def _compute_concentration_features(branch_daily: pd.DataFrame, cfg: WinnerBranchConfig) -> pd.DataFrame:
     x = branch_daily.copy()
 
     # Per stock-day concentration based on branch volume share
@@ -188,10 +188,11 @@ def _compute_concentration_features(branch_daily: pd.DataFrame) -> pd.DataFrame:
 
     day["date"] = pd.to_datetime(day["date"])
     grouped = day.groupby("stock_id", group_keys=False)
-    day["hhi_delta_10"] = grouped["hhi"].diff(10).fillna(0.0)
+    day["hhi_delta_10"] = grouped["hhi"].diff(cfg.hhi_rise_window).fillna(0.0)
 
-    roll_max = grouped["close"].rolling(10, min_periods=5).max().reset_index(level=0, drop=True)
-    roll_min = grouped["close"].rolling(10, min_periods=5).min().reset_index(level=0, drop=True)
+    min_periods = max(2, min(5, cfg.compression_window))
+    roll_max = grouped["close"].rolling(cfg.compression_window, min_periods=min_periods).max().reset_index(level=0, drop=True)
+    roll_min = grouped["close"].rolling(cfg.compression_window, min_periods=min_periods).min().reset_index(level=0, drop=True)
     day["price_compression"] = _safe_div(roll_max - roll_min, day["close"]).clip(lower=0)
 
     return day.reset_index(drop=True)
@@ -273,7 +274,7 @@ def build_winner_branch_outputs(
 
     winner_rating = _compute_winner_rating(branch_daily, cfg)
     daily_alerts = _build_daily_alerts(branch_daily, winner_rating, cfg)
-    concentration = _compute_concentration_features(branch_daily)
+    concentration = _compute_concentration_features(branch_daily, cfg)
     strategy_candidates = _build_strategy_candidates(concentration, cfg)
 
     return winner_rating, daily_alerts, concentration, strategy_candidates

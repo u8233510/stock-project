@@ -98,6 +98,8 @@ def show_winner_branch_system():
 
     with st.expander("進階參數 (Advanced Settings)", expanded=False):
         top_quantile = st.slider("Top Winner 分位數 (Top Winner Quantile)", min_value=0.7, max_value=0.98, value=0.85, step=0.01)
+        hhi_rise_window = st.slider("HHI 上升視窗 (HHI Rise Window)", min_value=5, max_value=30, value=10, step=1)
+        compression_window = st.slider("價格壓縮視窗 (Price Compression Window)", min_value=5, max_value=30, value=10, step=1)
         compression_threshold = st.slider("價格壓縮閾值 (Price Compression Threshold)", min_value=0.005, max_value=0.08, value=0.02, step=0.005)
 
     raw_df = _load_branch_raw(conn, sid, start_d, end_d)
@@ -109,7 +111,7 @@ def show_winner_branch_system():
 
     st.caption("此頁面已直接整合 ChipStrategyAI，資料來源為資料庫，不需上傳 CSV。 (Database source, no CSV upload needed.)")
 
-    wb_cfg = WinnerBranchConfig(top_quantile=top_quantile, compression_threshold=compression_threshold)
+    wb_cfg = WinnerBranchConfig(top_quantile=top_quantile, hhi_rise_window=hhi_rise_window, compression_window=compression_window, compression_threshold=compression_threshold)
 
     st.divider()
     st.subheader("🎯 需求 1：針對贏家分點自動化追蹤 (Requirement 1: Winner Branch Tracking)")
