@@ -340,3 +340,150 @@ print(weekly_report.head())
   1. 異常事件排行榜
   2. 可交易追蹤清單
   3. 每週摘要
+
+## AI 籌碼決策系統（點 + 面）
+
+你要同時做到兩件事：
+- **點（監控）**：持續追蹤「贏家分點」
+- **面（挖掘）**：從海量明細資料自動找出可回測的新策略
+
+這可落地成一個雙層架構：
+
+### 第一層：影子跟單（自動化追蹤贏家分點）
+
+重點不是誰買最多，而是「誰在對的時間買」。
+
+1. **動態贏家評級（Winner Rating）**
+   - 對每個分點做滾動回測（20/60/120 日）
+   - 核心分數建議：
+     ```text
+     winner_rating = 0.30*hit_rate + 0.30*pnl_ratio + 0.20*sharpe + 0.20*timing_score
+     ```
+   - `hit_rate`：訊號後 N 日正報酬比率
+   - `pnl_ratio`：平均獲利 / 平均虧損
+   - `sharpe`：風險調整後績效
+   - `timing_score`：買入位置是否接近波段起漲區
+
+2. **贏家型態分群（短線/長線）**
+   - 長線價值型：持有期長、回補慢、偏基本面事件
+   - 短線交易型：週轉快、集中出手、事件日反應快
+   - 作法：用持有天數、周轉率、回吐率做 clustering（KMeans/階層分群）
+
+3. **多因子高優先級警示**
+   - 例：
+     - 高勝率長線分點「首次回補」
+     - + 近期獲利了結分點再度回流
+     - + 股價仍在成本帶上緣
+   - 同時成立就觸發 A 級通知；單一條件成立僅 B/C 級觀察
+
+4. **潛伏型贏家偵測（異常行為）**
+   - 定義「低頻交易但高命中」分點
+   - 若平常交易少、但每次進場都接近起漲點，標記為潛伏型名單
+
+### 第二層：策略挖掘引擎（Feature Engineering + 回測）
+
+AI 先提案，策略引擎再驗證，避免直接讓模型決定買賣。
+
+1. **籌碼集中度特徵**
+   - 以 Entropy / HHI 量化集中速度：
+     ```text
+     HHI = sum((branch_share_i)^2)
+     Entropy = -sum(branch_share_i * log(branch_share_i))
+     ```
+   - 範例規則：10 日內 HHI 快速上升 + 價格波動收斂，視為蓄勢訊號
+
+2. **拆單意圖分析（大單拆小單）**
+   - 偵測連續小單節奏（例如固定時間間隔、固定小張數）
+   - 特徵可用：單筆張數分布、下單間隔、自相關、同價位重複掛單
+   - 若低位階出現高一致性拆單，列為高權重特徵
+
+3. **關聯分點網絡（Network Analysis）**
+   - 建立分點共現圖（同日同向買入、跨標的同步）
+   - 觀察社群結構與核心節點（community / centrality）
+   - 用來辨識可能的策略聯盟或共同操盤行為
+
+4. **統一回測驗證（必要）**
+   - 指標至少包含：年化報酬、Sharpe、MDD、勝率、卡瑪比
+   - 必做：交易成本、滑價、流動性門檻
+   - 必做：多市場狀態檢驗（多頭/空頭/盤整）
+
+### 本專案落地對應（現有模組）
+
+- `modules/branch_analysis.py`：產生分點日特徵（淨買超、連續性、成本帶）
+- `modules/branch_anomaly.py`：潛伏型/異常行為偵測
+- `utility/branch_anomaly_detection.py`：異常事件與觀察清單輸出
+- `modules/prediction.py`：將「觸發規則 + 風險條件」轉成可讀的策略摘要
+
+### 建議的每日批次流程（收盤後）
+
+1. 更新日資料（分點、OHLCV、法人、券資）
+2. 重算 Winner Rating 與分點分群標籤
+3. 計算集中度/拆單/網絡特徵
+4. 產生 A/B/C 級警示與候選策略
+5. 對候選策略跑快速回測並更新策略排行榜
+
+### MVP 建議時程（4 週）
+
+- 第 1 週：完成 Winner Rating + 分點分群
+- 第 2 週：完成 Entropy/HHI 與拆單偵測特徵
+- 第 3 週：完成分點網絡特徵 + 候選規則生成
+- 第 4 週：完成回測儀表板與紙上交易驗證
+
+## 程式碼：贏家分點追蹤 + 策略挖掘工具
+
+已提供可直接使用的程式碼：`utility/winner_branch_ai_system.py`
+
+```python
+import pandas as pd
+from utility.winner_branch_ai_system import build_winner_branch_outputs
+
+raw_df = pd.read_csv("your_branch_data.csv")
+# 需要欄位：stock_id, date, branch_id, price, buy, sell, close
+
+winner_rating, daily_alerts, concentration, strategy_candidates = build_winner_branch_outputs(raw_df)
+
+print(winner_rating.head())
+print(daily_alerts.head())
+print(strategy_candidates.head())
+```
+
+輸出說明：
+- `winner_rating`：分點勝率/盈虧比/Sharpe/時機分數整合後的贏家評級。
+- `daily_alerts`：依 A/B/C 級輸出的每日影子跟單警示。
+- `concentration`：含 `HHI`、`Entropy`、壓縮度等集中度特徵。
+- `strategy_candidates`：由集中度 + 壓縮條件產生的候選策略事件。
+
+### 這支 `winner_branch_ai_system.py` 掛在哪裡跑？
+
+已整合在 `app.py` 側邊選單：
+- 進入 **`🧠 AI 贏家分點追蹤`** 即可執行。
+
+執行方式：
+```bash
+streamlit run app.py
+```
+
+流程：選股票與日期區間 → 點「執行贏家分點計算」→ 取得
+1. Winner Rating
+2. Daily Alerts（A/B/C）
+3. Strategy Candidates（HHI/Entropy/壓縮）
+
+### Q: 一定要用 AI 模型訓練嗎？
+
+不一定，建議分兩階段：
+
+- **第一階段（贏家導向）**：可先不訓練模型，先跑規則與績效追蹤
+  - 分點資料聚合
+  - 分點績效回溯（勝率/盈虧比/Sharpe）
+  - Dashboard 每日掃描「頂級贏家」今日買入標的
+
+- **第二階段（模型導向）**：當你要擴充到策略挖掘，再做監督式學習
+  - 標註正樣本（例如未來 20 日曾上漲超過 8%）
+  - 以 `hhi / entropy / avg_buy_cost / buy_continuity / retail_exit_ratio` 等特徵訓練 XGBoost
+  - 做持有天數、停損比例參數掃描（proxy backtest）
+
+本專案已提供第二階段工具：`utility/winner_branch_ml.py`，並整合在 `🧠 AI 贏家分點追蹤` 頁面中可直接產生訓練資料與嘗試訓練。
+
+### 欄位中文化
+
+`🧠 AI 贏家分點追蹤` 頁面目前已將第一階段與第二階段輸出欄位顯示為中文（含下載 CSV 欄位）。
