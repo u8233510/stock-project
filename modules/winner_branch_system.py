@@ -6,6 +6,13 @@ import database
 from utility.branch_anomaly_detection import prepare_branch_daily_features
 from utility.chip_strategy_ai import ChipStrategyAI, ChipStrategyConfig
 from utility.winner_branch_ai_system import WinnerBranchConfig
+from utility.winner_branch_ml import (
+    WinnerMLConfig,
+    build_phase2_training_dataset,
+    build_today_candidate_list,
+    optimize_trade_params,
+    train_xgboost_classifier,
+)
 
 
 DISPLAY_COLUMN_MAP = {
@@ -51,6 +58,9 @@ DISPLAY_COLUMN_MAP = {
     "recent_expectancy": "近期期望值\nRecent Expectancy",
     "pause_strategy": "是否暫停\nPause Strategy",
     "status": "狀態\nStatus",
+    "model_score": "模型分數\nModel Score",
+    "model_signal": "模型訊號\nModel Signal",
+    "candidate_rank": "候選名次\nCandidate Rank",
 }
 
 ALERT_LEVEL_DESC = {
@@ -419,7 +429,7 @@ def show_winner_branch_system():
 
     st.divider()
     st.subheader("🧭 新版落地策略（先跑給你看）")
-    st.caption("已移除舊版需求2（XGBoost + 參數掃描），改為固定輸出三張落地表。")
+    st.caption("第二階段先提供可直接閱讀的三張落地表；若要 AI 模型訓練，可在下方展開進階區塊。")
 
     if st.button("⚙️ 產生落地策略三張表", use_container_width=True):
         rules_df, today_df, monitor_df = _build_grounded_strategy_tables(raw_df, min_support=min_support, recent_weeks=recent_weeks)
@@ -438,24 +448,108 @@ def show_winner_branch_system():
         today_df = grounded["today"]
         monitor_df = grounded["monitor"]
 
-        st.markdown("**1) 規則清單（support / win rate / avg return / expectancy / stability）**")
-        if rules_df.empty:
-            st.warning("規則樣本不足，請降低最小樣本數或拉長日期區間。")
-        else:
-            st.dataframe(_to_display_df(rules_df), use_container_width=True, hide_index=True)
+        metric_1, metric_2, metric_3 = st.columns(3)
+        with metric_1:
+            st.metric("規則數", len(rules_df))
+        with metric_2:
+            st.metric("今日觸發", len(today_df))
+        with metric_3:
+            pause_cnt = int(monitor_df["pause_strategy"].sum()) if "pause_strategy" in monitor_df.columns else 0
+            st.metric("建議暫停", pause_cnt)
 
-        st.markdown("**2) 今天觸發清單（觸發原因 / 風險分級 / 建議倉位）**")
-        if today_df.empty:
-            st.info("今天沒有規則被觸發。")
-        else:
-            st.dataframe(_to_display_df(today_df), use_container_width=True, hide_index=True)
+        tab_rules, tab_today, tab_monitor = st.tabs([
+            "1) 規則清單",
+            "2) 今日觸發",
+            "3) 失效監控",
+        ])
 
-        st.markdown("**3) 失效監控表（最近 N 週命中率下滑 / 是否暫停）**")
-        if monitor_df.empty:
-            st.info("目前沒有可監控規則（可能是樣本不足）。")
-        else:
-            st.dataframe(_to_display_df(monitor_df), use_container_width=True, hide_index=True)
+        with tab_rules:
+            st.caption("看 support、勝率、平均報酬與 expectancy，先挑出可執行規則。")
+            if rules_df.empty:
+                st.warning("規則樣本不足，請降低最小樣本數或拉長日期區間。")
+            else:
+                st.dataframe(_to_display_df(rules_df), use_container_width=True, hide_index=True)
+
+        with tab_today:
+            st.caption("只看今天有觸發的規則，直接對應風險分級與建議倉位。")
+            if today_df.empty:
+                st.info("今天沒有規則被觸發。")
+            else:
+                st.dataframe(_to_display_df(today_df), use_container_width=True, hide_index=True)
+
+        with tab_monitor:
+            st.caption("檢查近期命中率是否下滑；若 pause_strategy=True，建議先停用該規則。")
+            if monitor_df.empty:
+                st.info("目前沒有可監控規則（可能是樣本不足）。")
+            else:
+                st.dataframe(_to_display_df(monitor_df), use_container_width=True, hide_index=True)
     else:
         st.info("請點擊「產生落地策略三張表」。")
+
+    with st.expander("🤖 第二階段進階：AI 模型訓練（可選）"):
+        st.markdown("- 預設流程不一定會訓練模型；它先用可解釋規則讓你快速落地。\n- 若你要模型導向，可在這裡建立資料集並嘗試 XGBoost。")
+
+        ml_c1, ml_c2, ml_c3 = st.columns(3)
+        with ml_c1:
+            lookahead_days = st.slider("標記觀察天數", 5, 40, 20, 1)
+        with ml_c2:
+            rally_threshold = st.slider("正樣本漲幅門檻", 0.03, 0.2, 0.08, 0.01)
+        with ml_c3:
+            score_threshold = st.slider("候選分數門檻", 0.5, 0.9, 0.55, 0.01)
+
+        if st.button("🧪 執行 AI 模型訓練", use_container_width=True):
+            ml_cfg = WinnerMLConfig(lookahead_days=lookahead_days, rally_threshold=rally_threshold)
+            ds = build_phase2_training_dataset(raw_df, cfg=ml_cfg)
+            model_result = train_xgboost_classifier(ds)
+            param_scan = optimize_trade_params(ds)
+            candidates = build_today_candidate_list(ds, model_result, score_threshold=score_threshold)
+
+            st.session_state["phase2_ml_cache"] = {
+                "sid": sid,
+                "start_d": start_d,
+                "end_d": end_d,
+                "dataset": ds,
+                "model_result": model_result,
+                "param_scan": param_scan,
+                "candidates": candidates,
+            }
+
+        ml_cache = st.session_state.get("phase2_ml_cache")
+        if ml_cache and ml_cache.get("sid") == sid and ml_cache.get("start_d") == start_d and ml_cache.get("end_d") == end_d:
+            ds = ml_cache["dataset"]
+            model_result = ml_cache["model_result"]
+            param_scan = ml_cache["param_scan"]
+            candidates = ml_cache["candidates"]
+
+            st.markdown("**訓練資料集（前 200 筆）**")
+            st.dataframe(_to_display_df(ds.head(200)), use_container_width=True, hide_index=True)
+
+            st.markdown("**模型結果**")
+            status = model_result.get("status", "unknown")
+            if status == "ok":
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Accuracy", model_result.get("accuracy", 0.0))
+                m2.metric("Precision", model_result.get("precision", 0.0))
+                m3.metric("Recall", model_result.get("recall", 0.0))
+            else:
+                st.warning(f"模型未完成訓練：{model_result.get('message', status)}")
+
+            with st.expander("查看模型詳細輸出（JSON）"):
+                show_json = {k: v for k, v in model_result.items() if k != "model"}
+                st.json(show_json)
+
+            st.markdown("**參數掃描**")
+            if param_scan.empty:
+                st.info("沒有可用的參數掃描結果。")
+            else:
+                st.dataframe(_to_display_df(param_scan), use_container_width=True, hide_index=True)
+
+            st.markdown("**最新候選清單（模型分數）**")
+            if candidates.empty:
+                st.info("目前沒有模型分數達門檻的候選。")
+            else:
+                st.dataframe(_to_display_df(candidates), use_container_width=True, hide_index=True)
+        else:
+            st.info("點擊「執行 AI 模型訓練」後，會在此顯示資料集與模型結果。")
 
     conn.close()
