@@ -65,7 +65,16 @@ RATING_FOCUS_COLUMNS = [
 
 
 def _to_display_df(df: pd.DataFrame) -> pd.DataFrame:
-    return df.rename(columns={k: v for k, v in DISPLAY_COLUMN_MAP.items() if k in df.columns})
+    display_df = df.copy()
+
+    if "stock_id" in display_df.columns:
+        display_df = display_df.drop(columns=["stock_id"])
+
+    if "date" in display_df.columns:
+        parsed_date = pd.to_datetime(display_df["date"], errors="coerce")
+        display_df["date"] = parsed_date.dt.strftime("%Y-%m-%d").where(parsed_date.notna(), display_df["date"])
+
+    return display_df.rename(columns={k: v for k, v in DISPLAY_COLUMN_MAP.items() if k in display_df.columns})
 
 
 def _render_winner_rating_table(rating_df: pd.DataFrame, branch_lookup: pd.DataFrame):
