@@ -16,6 +16,7 @@ import pandas as pd
 from utility.winner_branch_ai_system import WinnerBranchConfig, build_winner_branch_outputs
 from utility.winner_branch_ml import (
     WinnerMLConfig,
+    build_today_candidate_list,
     build_phase2_training_dataset,
     optimize_trade_params,
     train_xgboost_classifier,
@@ -179,7 +180,18 @@ class ChipStrategyAI:
 
         model_result = train_xgboost_classifier(dataset)
         param_scan = optimize_trade_params(dataset, signal_col="label_positive")
-        return {"dataset": dataset, "model_result": model_result, "param_scan": param_scan}
+        today_candidates = build_today_candidate_list(
+            dataset,
+            model_result,
+            score_threshold=0.55,
+            top_n=20,
+        )
+        return {
+            "dataset": dataset,
+            "model_result": model_result,
+            "param_scan": param_scan,
+            "today_candidates": today_candidates,
+        }
 
     # backward-compatible wrappers
     def get_winner_list(self, start_date=None, end_date=None, top_n: int = 20) -> pd.DataFrame:
