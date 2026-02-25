@@ -358,8 +358,23 @@ def show_winner_branch_system():
             end_d = default_end.isoformat()
     with c3:
         st.caption("策略輸出設定")
-        min_support = st.slider("最小樣本數", min_value=10, max_value=120, value=30, step=5)
-        recent_weeks = st.slider("失效監控最近週數", min_value=2, max_value=12, value=4, step=1)
+        with st.expander("策略輸出參數（可收合）", expanded=False):
+            min_support = st.slider("最小樣本數", min_value=10, max_value=120, value=30, step=5)
+            recent_weeks = st.slider("失效監控最近週數", min_value=2, max_value=12, value=4, step=1)
+            st.markdown(
+                "\n".join(
+                    [
+                        "**參數意義與數值大小**",
+                        "- **最小樣本數**：規則至少要有多少歷史樣本才會被列出。",
+                        "  - 數值越大：規則更穩健，但可用規則會變少。",
+                        "  - 例：`30` 代表某條規則至少出現 30 次才納入統計。",
+                        "- **失效監控最近週數**：觀察近幾週績效是否劣化。",
+                        "  - 數值越小：反應更快、但波動較大。",
+                        "  - 數值越大：趨勢更平滑、但反應較慢。",
+                        "  - 例：`4` 代表用最近 4 週命中率和歷史基準做比較。",
+                    ]
+                )
+            )
 
     raw_df = _load_branch_raw(conn, sid, start_d, end_d)
     if raw_df.empty:
@@ -372,10 +387,34 @@ def show_winner_branch_system():
 
     st.caption("此頁面已整合：需求1分點追蹤 + 新版落地策略三張表（規則、今日觸發、失效監控）。")
 
-    top_quantile = st.slider("Top quantile（贏家門檻）", min_value=0.60, max_value=0.95, value=0.80, step=0.01)
-    hhi_rise_window = st.slider("HHI 變化視窗（日）", min_value=5, max_value=30, value=10, step=1)
-    compression_window = st.slider("價格壓縮視窗（日）", min_value=3, max_value=15, value=5, step=1)
-    compression_threshold = st.slider("價格壓縮門檻", min_value=0.001, max_value=0.03, value=0.01, step=0.001)
+    with st.expander("贏家分點模型參數（可收合）", expanded=False):
+        top_quantile = st.slider("Top quantile（贏家門檻）", min_value=0.60, max_value=0.95, value=0.80, step=0.01)
+        hhi_rise_window = st.slider("HHI 變化視窗（日）", min_value=5, max_value=30, value=10, step=1)
+        compression_window = st.slider("價格壓縮視窗（日）", min_value=3, max_value=15, value=5, step=1)
+        compression_threshold = st.slider("價格壓縮門檻", min_value=0.001, max_value=0.03, value=0.01, step=0.001)
+        st.markdown(
+            "\n".join(
+                [
+                    "**參數意義與數值大小（含範例）**",
+                    "- **Top quantile（贏家門檻）**：只挑分數落在前幾%的分點作為贏家。",
+                    "  - 數值越高（如 `0.90`）：門檻更嚴格，入選更少但更精英。",
+                    "  - 數值越低（如 `0.70`）：門檻較寬鬆，入選較多。",
+                    "  - 例：`0.80` 代表只取前 20% 的分點。",
+                    "- **HHI 變化視窗（日）**：用幾天來計算分點集中度（HHI）的變化。",
+                    "  - 數值越小：對短線集中更敏感。",
+                    "  - 數值越大：偏中期趨勢，較不受單日噪音影響。",
+                    "  - 例：`10` 代表比較近 10 天集中度是否上升。",
+                    "- **價格壓縮視窗（日）**：用幾天衡量價格波動是否收斂。",
+                    "  - 數值越小：更著重近期壓縮。",
+                    "  - 數值越大：更著重整段區間壓縮。",
+                    "  - 例：`5` 代表用最近 5 天計算壓縮狀態。",
+                    "- **價格壓縮門檻**：判定『壓縮』成立的臨界值。",
+                    "  - 數值越小（如 `0.005`）：條件更嚴格，必須非常窄幅。",
+                    "  - 數值越大（如 `0.02`）：條件較寬鬆，較容易觸發。",
+                    "  - 例：`0.01` 約可理解為 1% 以內波動才算壓縮。",
+                ]
+            )
+        )
 
     wb_cfg = WinnerBranchConfig(
         top_quantile=top_quantile,
