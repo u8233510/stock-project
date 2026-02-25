@@ -83,19 +83,35 @@ def _render_winner_rating_table(rating_df: pd.DataFrame, branch_lookup: pd.DataF
         merged = merged.sort_values(available_sort_cols, ascending=[False] * len(available_sort_cols))
 
     st.caption("同一張表整合全部重點欄位，可依 Rating 篩選要顯示的分點。")
+    st.caption("Top N：只保留評分最高前 N 筆；Rating 門檻：保留所有評分 >= 指定分數的分點。")
 
     filter_mode = st.radio(
         "顯示分點篩選方式",
         options=["全部分點", "Top N（依 Rating）", "Rating 門檻"],
         horizontal=True,
+        key="winner_rating_filter_mode",
     )
 
     if filter_mode == "Top N（依 Rating）":
         max_rows = max(1, len(merged))
-        top_n = st.slider("顯示前 N 名分點", min_value=1, max_value=max_rows, value=min(20, max_rows), step=1)
+        top_n = st.slider(
+            "顯示前 N 名分點",
+            min_value=1,
+            max_value=max_rows,
+            value=min(20, max_rows),
+            step=1,
+            key="winner_rating_top_n",
+        )
         display_df = merged.head(top_n)
     elif filter_mode == "Rating 門檻":
-        threshold = st.slider("最低 Winner Rating", min_value=0.0, max_value=100.0, value=60.0, step=0.5)
+        threshold = st.slider(
+            "最低 Winner Rating",
+            min_value=0.0,
+            max_value=100.0,
+            value=60.0,
+            step=0.5,
+            key="winner_rating_threshold",
+        )
         display_df = merged[merged["winner_rating"] >= threshold]
     else:
         display_df = merged
@@ -105,6 +121,7 @@ def _render_winner_rating_table(rating_df: pd.DataFrame, branch_lookup: pd.DataF
         options=[str(v) for v in display_df["branch_id"].astype(str).unique()],
         default=[],
         help="不選則顯示篩選後的全部分點。",
+        key="winner_rating_branch_multiselect",
     )
     if selected_branches:
         display_df = display_df[display_df["branch_id"].astype(str).isin(selected_branches)]
@@ -185,7 +202,9 @@ def show_winner_branch_system():
 
     st.divider()
     st.subheader("🎯 需求 1：針對贏家分點自動化追蹤 (Requirement 1: Winner Branch Tracking)")
-    top_n = st.slider("Top N 贏家分點 (Top N Winner Branches)", min_value=5, max_value=50, value=20, step=1)
+
+    if "winner_track_cache" not in st.session_state:
+        st.session_state["winner_track_cache"] = None
 
     if st.button("🚀 執行需求1：贏家分點追蹤 (Run Requirement 1)", use_container_width=True):
         branch_lookup = (
@@ -202,8 +221,20 @@ def show_winner_branch_system():
             end_date=end_d,
             config=ChipStrategyConfig(winner_cfg=wb_cfg),
         )
-        track = chip.track_winner_branches(top_n=top_n)
+        track = chip.track_winner_branches()
         track["winner_rating"]["branch_id"] = track["winner_rating"]["branch_id"].astype(str)
+        st.session_state["winner_track_cache"] = {
+            "sid": sid,
+            "start_d": start_d,
+            "end_d": end_d,
+            "track": track,
+            "branch_lookup": branch_lookup,
+        }
+
+    cache = st.session_state.get("winner_track_cache")
+    if cache and cache.get("sid") == sid and cache.get("start_d") == start_d and cache.get("end_d") == end_d:
+        track = cache["track"]
+        branch_lookup = cache["branch_lookup"]
 
         st.subheader("🏆 Winner Rating（分點評級）")
         _render_winner_rating_table(track["winner_rating"], branch_lookup)
@@ -232,6 +263,8 @@ def show_winner_branch_system():
             f"{sid}_winner_alerts.csv",
             "text/csv",
         )
+    else:
+        st.info("請先點擊「執行需求1：贏家分點追蹤」後，再使用 Top N / Rating 門檻篩選。")
 
     st.divider()
     st.subheader("🤖 需求 2：AI 從海量數據挖掘新交易策略 (Requirement 2: Strategy Mining)")
