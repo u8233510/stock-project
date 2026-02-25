@@ -61,6 +61,20 @@ DISPLAY_COLUMN_MAP = {
     "model_score": "模型分數\nModel Score",
     "model_signal": "模型訊號\nModel Signal",
     "candidate_rank": "候選名次\nCandidate Rank",
+    "close": "收盤價\nClose",
+    "avg_buy_cost": "平均買入成本\nAverage Buy Cost",
+    "cost_gap": "成本乖離\nCost Gap",
+    "net_buy_strength": "淨買強度\nNet Buy Strength",
+    "buy_continuity": "連續買入度\nBuy Continuity",
+    "retail_exit_ratio": "散戶退出比\nRetail Exit Ratio",
+    "future_max_ret": "未來最大報酬\nFuture Max Return",
+    "label_positive": "正樣本標記\nPositive Label",
+    "future_ret_5": "5日未來報酬\n5D Future Return",
+    "future_ret_10": "10日未來報酬\n10D Future Return",
+    "future_ret_20": "20日未來報酬\n20D Future Return",
+    "hold_days": "持有天數\nHolding Days",
+    "stop_loss": "停損\nStop Loss",
+    "sample_size": "樣本數\nSample Size",
 }
 
 ALERT_LEVEL_DESC = {
@@ -570,13 +584,13 @@ def show_winner_branch_system():
 
         ml_c1, ml_c2, ml_c3 = st.columns(3)
         with ml_c1:
-            lookahead_days = st.slider("標記觀察天數", 5, 40, 20, 1)
+            lookahead_days = st.slider("標記觀察天數\nLookahead Days", 5, 40, 20, 1)
         with ml_c2:
-            rally_threshold = st.slider("正樣本漲幅門檻", 0.03, 0.2, 0.08, 0.01)
+            rally_threshold = st.slider("正樣本漲幅門檻\nPositive Label Return Threshold", 0.03, 0.2, 0.08, 0.01)
         with ml_c3:
-            score_threshold = st.slider("候選分數門檻", 0.5, 0.9, 0.55, 0.01)
+            score_threshold = st.slider("候選分數門檻\nCandidate Score Threshold", 0.5, 0.9, 0.55, 0.01)
 
-        if st.button("🧪 執行 AI 模型訓練", use_container_width=True):
+        if st.button("🧪 執行 AI 模型訓練\nRun AI Model Training", use_container_width=True):
             ml_cfg = WinnerMLConfig(lookahead_days=lookahead_days, rally_threshold=rally_threshold)
             ds = build_phase2_training_dataset(raw_df, cfg=ml_cfg)
             model_result = train_xgboost_classifier(ds)
@@ -600,35 +614,35 @@ def show_winner_branch_system():
             param_scan = ml_cache["param_scan"]
             candidates = ml_cache["candidates"]
 
-            st.markdown("**訓練資料集（前 200 筆）**")
+            st.markdown("**訓練資料集（前 200 筆）\nTraining Dataset (Top 200 Rows)**")
             st.dataframe(_to_display_df(ds.head(200)), use_container_width=True, hide_index=True)
 
-            st.markdown("**模型結果**")
+            st.markdown("**模型結果\nModel Results**")
             status = model_result.get("status", "unknown")
             if status == "ok":
                 m1, m2, m3 = st.columns(3)
-                m1.metric("Accuracy", model_result.get("accuracy", 0.0))
-                m2.metric("Precision", model_result.get("precision", 0.0))
-                m3.metric("Recall", model_result.get("recall", 0.0))
+                m1.metric("準確率\nAccuracy", model_result.get("accuracy", 0.0))
+                m2.metric("精確率\nPrecision", model_result.get("precision", 0.0))
+                m3.metric("召回率\nRecall", model_result.get("recall", 0.0))
             else:
                 st.warning(f"模型未完成訓練：{model_result.get('message', status)}")
 
-            with st.expander("查看模型詳細輸出（JSON）"):
+            with st.expander("查看模型詳細輸出（JSON）\nView Model JSON"):
                 show_json = {k: v for k, v in model_result.items() if k != "model"}
                 st.json(show_json)
 
-            st.markdown("**參數掃描**")
+            st.markdown("**參數掃描\nParameter Scan**")
             if param_scan.empty:
                 st.info("沒有可用的參數掃描結果。")
             else:
                 st.dataframe(_to_display_df(param_scan), use_container_width=True, hide_index=True)
 
-            st.markdown("**最新候選清單（模型分數）**")
+            st.markdown("**最新候選清單（模型分數）\nLatest Candidates (Model Score)**")
             if candidates.empty:
                 st.info("目前沒有模型分數達門檻的候選。")
             else:
                 st.dataframe(_to_display_df(candidates), use_container_width=True, hide_index=True)
         else:
-            st.info("點擊「執行 AI 模型訓練」後，會在此顯示資料集與模型結果。")
+            st.info("點擊「執行 AI 模型訓練」後，會在此顯示資料集與模型結果。\nClick 'Run AI Model Training' to show dataset and model results here.")
 
     conn.close()
