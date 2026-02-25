@@ -24,6 +24,7 @@ DISPLAY_COLUMN_MAP = {
     "net_vol": "淨買賣超\nNet Volume",
     "vol_share": "成交量占比\nVolume Share",
     "alert_level": "警示等級\nAlert Level",
+    "alert_level_desc": "警示說明\nAlert Description",
     "reason": "觸發原因\nTrigger Reason",
     "hhi": "HHI 集中度\nHHI Concentration",
     "entropy": "熵值\nEntropy",
@@ -39,6 +40,12 @@ DISPLAY_COLUMN_MAP = {
     "model_score": "模型分數\nModel Score",
     "model_signal": "模型訊號\nModel Signal",
     "candidate_rank": "候選排名\nCandidate Rank",
+}
+
+ALERT_LEVEL_DESC = {
+    "A": "A 級（最強）",
+    "B": "B 級（中強）",
+    "C": "C 級（觀察）",
 }
 
 RATING_FOCUS_COLUMNS = [
@@ -240,7 +247,12 @@ def show_winner_branch_system():
         _render_winner_rating_table(track["winner_rating"], branch_lookup)
 
         st.subheader("🔔 Daily Alerts（A/B/C）")
-        st.dataframe(_to_display_df(track["daily_alerts"]), use_container_width=True, hide_index=True)
+        alerts_df = track["daily_alerts"].copy()
+        alerts_df["branch_id"] = alerts_df["branch_id"].astype(str)
+        daily_alerts_display = alerts_df.merge(branch_lookup, on="branch_id", how="left")
+        daily_alerts_display["branch_name"] = daily_alerts_display["branch_name"].fillna("-")
+        daily_alerts_display["alert_level_desc"] = daily_alerts_display["alert_level"].map(ALERT_LEVEL_DESC).fillna("-")
+        st.dataframe(_to_display_df(daily_alerts_display), use_container_width=True, hide_index=True)
 
         st.subheader("🧪 Strategy Candidates（集中度策略候選）")
         cand = track["strategy_candidates"]
@@ -259,7 +271,7 @@ def show_winner_branch_system():
         )
         st.download_button(
             "📥 下載 Daily Alerts CSV (Download)",
-            track["daily_alerts"].to_csv(index=False).encode("utf-8-sig"),
+            daily_alerts_display.to_csv(index=False).encode("utf-8-sig"),
             f"{sid}_winner_alerts.csv",
             "text/csv",
         )
