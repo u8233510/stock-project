@@ -111,28 +111,32 @@ def _build_holding_style(events_df: pd.DataFrame) -> pd.DataFrame:
         & (out["net_flow_ratio"].abs() <= 0.08)
     )
 
+    directional_persistence = (
+        (out["net_flow_ratio"].abs() >= 0.10)
+        | out["flag_accumulation"]
+        | out["flag_distribution"]
+        | (out["stealth_accum_days"] >= 2)
+        | (out["stealth_dist_days"] >= 2)
+        | (out["supply_to_market_days"] >= 2)
+        | (out["absorb_from_market_days"] >= 2)
+    )
+
     sustained_signal = (
         (out["event_days"] >= 4)
-        & (event_ratio >= 0.12)
-        & (out["vol_share"] >= 0.04)
-        & (
-            (out["net_flow_ratio"].abs() >= 0.08)
-            | out["flag_accumulation"]
-            | out["flag_distribution"]
-            | (out["stealth_accum_days"] >= 2)
-            | (out["stealth_dist_days"] >= 2)
-        )
+        & (event_ratio >= 0.10)
+        & (out["vol_share"] >= 0.035)
+        & directional_persistence
     )
 
     short_term_signal = (
         out["is_daytrade_like"]
-        | out["is_nextday_like"]
-        | (out["event_days"] <= 2)
-        | ((event_ratio < 0.08) & (out["net_flow_ratio"].abs() < 0.08))
+        | ((out["event_days"] <= 2) & (out["net_flow_ratio"].abs() < 0.12))
+        | (out["is_nextday_like"] & ~directional_persistence)
     )
 
     out["holding_style"] = "短線進出"
-    out.loc[sustained_signal & ~short_term_signal, "holding_style"] = "長線持有"
+    out.loc[sustained_signal & ~out["is_daytrade_like"], "holding_style"] = "長線持有"
+    out.loc[short_term_signal & ~sustained_signal, "holding_style"] = "短線進出"
 
     return out
 
