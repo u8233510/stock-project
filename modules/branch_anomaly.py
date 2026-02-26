@@ -340,26 +340,46 @@ def show_branch_anomaly():
 
         run = st.button("執行異常偵測", type="primary", use_container_width=True)
 
-    if not run:
-        return
+    state_key = "branch_anomaly_result"
+    if run:
+        raw_df = _load_branch_raw(conn, sid, str(start_d), str(end_d))
+        if raw_df.empty:
+            st.info("選定區間內無可用資料。")
+            st.session_state.pop(state_key, None)
+            return
 
-    raw_df = _load_branch_raw(conn, sid, str(start_d), str(end_d))
-    if raw_df.empty:
-        st.info("選定區間內無可用資料。")
-        return
+        detector_cfg = BranchAnomalyConfig(
+            short_window=20,
+            long_window=60,
+            z_threshold=float(z_threshold),
+            gross_z_threshold=float(z_threshold),
+            vol_share_threshold=float(vol_share_threshold),
+            medium_score_threshold=float(medium_score),
+        )
 
-    detector_cfg = BranchAnomalyConfig(
-        short_window=20,
-        long_window=60,
-        z_threshold=float(z_threshold),
-        gross_z_threshold=float(z_threshold),
-        vol_share_threshold=float(vol_share_threshold),
-        medium_score_threshold=float(medium_score),
-    )
+        anomaly_events, watchlist, weekly_report = build_anomaly_outputs(raw_df, detector_cfg)
+        classified_events = _build_long_short_labels(anomaly_events)
+        classified_watchlist = _build_long_short_labels(watchlist) if not watchlist.empty else watchlist
+        st.session_state[state_key] = {
+            "sid": sid,
+            "start_d": str(start_d),
+            "end_d": str(end_d),
+            "anomaly_events": anomaly_events,
+            "watchlist": watchlist,
+            "weekly_report": weekly_report,
+            "classified_events": classified_events,
+            "classified_watchlist": classified_watchlist,
+        }
+    else:
+        cached_result = st.session_state.get(state_key)
+        if cached_result is None:
+            return
 
-    anomaly_events, watchlist, weekly_report = build_anomaly_outputs(raw_df, detector_cfg)
-    classified_events = _build_long_short_labels(anomaly_events)
-    classified_watchlist = _build_long_short_labels(watchlist) if not watchlist.empty else watchlist
+        anomaly_events = cached_result["anomaly_events"]
+        watchlist = cached_result["watchlist"]
+        weekly_report = cached_result["weekly_report"]
+        classified_events = cached_result["classified_events"]
+        classified_watchlist = cached_result["classified_watchlist"]
 
     st.success(f"完成：共彙整 {len(anomaly_events)} 個分點，追蹤名單 {len(watchlist)} 筆。")
     _render_summary_cards(anomaly_events, watchlist)
