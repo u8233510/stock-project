@@ -223,6 +223,8 @@ def build_anomaly_outputs(
     scored = compute_anomaly_score(flagged)
 
     scored["event_score"] = scored["anomaly_score"].where(scored["rule_triggered"], np.nan)
+    scored["event_buy_day"] = ((scored["rule_triggered"]) & (scored["net_vol"] > 0)).astype(int)
+    scored["event_sell_day"] = ((scored["rule_triggered"]) & (scored["net_vol"] < 0)).astype(int)
 
     interval_summary = (
         scored.groupby(["stock_id", "branch_id"], as_index=False)
@@ -240,8 +242,8 @@ def build_anomaly_outputs(
             vol_share=("vol_share", "mean"),
             net_vol_sum=("net_vol", "sum"),
             gross_vol_sum=("gross_vol", "sum"),
-            buy_event_days=("net_vol", lambda s: int((s > 0).sum())),
-            sell_event_days=("net_vol", lambda s: int((s < 0).sum())),
+            buy_event_days=("event_buy_day", "sum"),
+            sell_event_days=("event_sell_day", "sum"),
             flag_accumulation=("flag_accumulation", "max"),
             flag_distribution=("flag_distribution", "max"),
             stealth_accum_days=("flag_stealth_accumulation", "sum"),
