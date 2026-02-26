@@ -255,12 +255,15 @@ def build_anomaly_outputs(
     )
 
     interval_summary["net_flow_ratio"] = _safe_div(interval_summary["net_vol_sum"], interval_summary["gross_vol_sum"])
+    stealth_buy_consistent = (interval_summary["stealth_accum_days"] >= 2) & (interval_summary["net_flow_ratio"] > 0)
+    stealth_sell_consistent = (interval_summary["stealth_dist_days"] >= 2) & (interval_summary["net_flow_ratio"] < 0)
+
     interval_summary["dominant_action"] = np.select(
         [
             interval_summary["supply_to_market_days"] >= 2,
             interval_summary["absorb_from_market_days"] >= 2,
-            interval_summary["stealth_accum_days"] >= 2,
-            interval_summary["stealth_dist_days"] >= 2,
+            stealth_buy_consistent,
+            stealth_sell_consistent,
             interval_summary["net_flow_ratio"] >= 0.15,
             interval_summary["net_flow_ratio"] <= -0.15,
         ],
