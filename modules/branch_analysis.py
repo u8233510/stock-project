@@ -191,6 +191,16 @@ def _run_lightgbm_branch_forecast(conn, sid, current_price, main_force_cost, chi
     forecast_raw = float(model.predict(pd.DataFrame([latest_row[feature_cols]]))[0])
     forecast = max(min(forecast_raw, 40.0), -40.0)
 
+    feature_snapshot = {k: float(latest_row[k]) for k in feature_cols}
+    contradictory_chip_signal = (
+        feature_snapshot["net_vol_5"] <= 0
+        and feature_snapshot["net_vol_20"] <= 0
+        and feature_snapshot["net_vol_60"] <= 0
+        and feature_snapshot["concentration_5"] <= 0
+        and feature_snapshot["concentration_20"] <= 0
+        and feature_snapshot["concentration_60"] <= 0
+    )
+
     return {
         "status": "ok",
         "samples": int(len(model_ds)),
@@ -199,6 +209,8 @@ def _run_lightgbm_branch_forecast(conn, sid, current_price, main_force_cost, chi
         "mae": round(float(mae), 3),
         "pred_return_5d": round(forecast, 2),
         "pred_return_5d_raw": round(forecast_raw, 2),
+        "feature_snapshot": feature_snapshot,
+        "contradictory_chip_signal": bool(contradictory_chip_signal),
     }
 
 
@@ -314,6 +326,21 @@ def show_branch_analysis():
                     f"樣本數 {lgbm_result['samples']}（訓練 {lgbm_result['train_samples']} / 測試 {lgbm_result['test_samples']}），"
                     f"測試 MAE：{lgbm_result['mae']}"
                 )
+                fs = lgbm_result.get("feature_snapshot", {})
+                if fs:
+                    st.caption(
+                        "模型輸入快照："
+                        f"net_vol(5/20/60)=({fs['net_vol_5']:.0f}/{fs['net_vol_20']:.0f}/{fs['net_vol_60']:.0f})，"
+                        f"concentration(5/20/60)=({fs['concentration_5']:.2f}%/{fs['concentration_20']:.2f}%/{fs['concentration_60']:.2f}%)，"
+                        f"cost_gap_20={fs['cost_gap_20']:.2f}%"
+                    )
+
+                if lgbm_result.get("contradictory_chip_signal") and lgbm_result["pred_return_5d"] > 0:
+                    st.warning(
+                        "⚠️ 目前籌碼為連續賣超/負集中，但模型仍預測上漲。"
+                        "這通常代表模型從歷史樣本學到『成本位階/均值回歸』訊號暫時強於籌碼訊號，"
+                        "請搭配風險控管與其他模組交叉確認。"
+                    )
             elif lgbm_result["status"] == "missing_dependency":
                 st.warning(lgbm_result["message"])
             else:
