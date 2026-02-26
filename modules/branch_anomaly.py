@@ -95,6 +95,20 @@ def _build_holding_style(events_df: pd.DataFrame) -> pd.DataFrame:
     event_ratio = (out["event_days"] / out["observed_days"].replace(0, pd.NA)).fillna(0.0)
     buy_ratio = (out["buy_event_days"] / out["event_days"].replace(0, pd.NA)).fillna(0.0)
     sell_ratio = (out["sell_event_days"] / out["event_days"].replace(0, pd.NA)).fillna(0.0)
+    directional_event_ratio = pd.concat([buy_ratio, sell_ratio], axis=1).max(axis=1).fillna(0.0)
+
+    persistence_days = (
+        out["stealth_accum_days"]
+        + out["stealth_dist_days"]
+        + out["supply_to_market_days"]
+        + out["absorb_from_market_days"]
+    )
+    persistence_ratio = (persistence_days / out["event_days"].replace(0, pd.NA)).clip(0, 1).fillna(0.0)
+    directional_strength = (
+        out["net_flow_ratio"].abs().clip(0, 1) * 0.45
+        + directional_event_ratio * 0.35
+        + persistence_ratio * 0.20
+    )
 
     out["is_daytrade_like"] = (
         (out["event_days"] >= 2)
@@ -122,20 +136,30 @@ def _build_holding_style(events_df: pd.DataFrame) -> pd.DataFrame:
     )
 
     sustained_signal = (
-        (out["event_days"] >= 4)
-        & (event_ratio >= 0.10)
-        & (out["vol_share"] >= 0.035)
+        (out["event_days"] >= 3)
+        & (event_ratio >= 0.06)
+        & (out["vol_share"] >= 0.02)
         & directional_persistence
+        & (directional_strength >= 0.30)
+    )
+
+    swing_signal = (
+        (out["event_days"] >= 2)
+        & (event_ratio >= 0.03)
+        & (out["vol_share"] >= 0.015)
+        & (directional_strength >= 0.22)
+        & ~out["is_daytrade_like"]
     )
 
     short_term_signal = (
         out["is_daytrade_like"]
         | ((out["event_days"] <= 2) & (out["net_flow_ratio"].abs() < 0.12))
-        | (out["is_nextday_like"] & ~directional_persistence)
+        | (out["is_nextday_like"] & (directional_strength < 0.24))
     )
 
     out["holding_style"] = "短線進出"
-    out.loc[sustained_signal & ~out["is_daytrade_like"], "holding_style"] = "長線持有"
+    out.loc[swing_signal & ~short_term_signal, "holding_style"] = "波段操作"
+    out.loc[sustained_signal & (directional_strength >= 0.42), "holding_style"] = "長線持有"
     out.loc[short_term_signal & ~sustained_signal, "holding_style"] = "短線進出"
 
     return out
