@@ -35,10 +35,7 @@ COLUMN_LABELS = {
     "avg_vol_share": "平均成交占比",
     "adj_avg_score": "穩健異常分數",
     "adj_avg_vol_share": "穩健成交占比",
-    "short_category": "短線分類",
-    "long_category": "長線分類",
-    "short_score": "短線分數",
-    "long_score": "長線分數",
+    "holding_style": "持有週期",
     "is_daytrade_like": "當沖主導",
 }
 
@@ -49,19 +46,6 @@ LEVEL_LABELS = {
 }
 
 ACTION_ORDER = ["偷偷進貨", "偷偷在賣", "供給籌碼", "承接籌碼", "偏買", "偏賣", "中性"]
-
-NINE_CATEGORY_ORDER = [
-    "主力攻擊",
-    "主力倒貨",
-    "主力進貨",
-    "主力出貨",
-    "偷偷買",
-    "偷偷賣",
-    "當沖主導",
-    "隔日沖主導",
-    "無明顯主力活動",
-]
-
 
 def _localize_table(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
@@ -104,8 +88,8 @@ def _render_column_guide() -> None:
 
 
 
-def _build_long_short_labels(events_df: pd.DataFrame) -> pd.DataFrame:
-    """Create short/long horizon 9-category labels and ranking scores."""
+def _build_holding_style(events_df: pd.DataFrame) -> pd.DataFrame:
+    """Create a concise holding style label for each branch anomaly event."""
     out = events_df.copy()
 
     event_ratio = (out["event_days"] / out["observed_days"].replace(0, pd.NA)).fillna(0.0)
@@ -127,115 +111,16 @@ def _build_long_short_labels(events_df: pd.DataFrame) -> pd.DataFrame:
         & (out["net_flow_ratio"].abs() <= 0.08)
     )
 
-    out["is_attack"] = (
-        (out["anomaly_score"] >= 70)
-        & (out["event_days"] >= 2)
-        & (out["net_flow_ratio"] >= 0.12)
-        & ((out["flag_accumulation"]) | (out["dominant_action"].isin(["承接籌碼", "偏買"])))
-    )
-
-    out["is_dump"] = (
-        (out["anomaly_score"] >= 70)
-        & (out["event_days"] >= 2)
-        & (out["net_flow_ratio"] <= -0.12)
-        & ((out["flag_distribution"]) | (out["dominant_action"].isin(["供給籌碼", "偏賣"])))
-    )
-
-    out["is_build_long"] = (
-        (out["event_days"] >= 2)
-        & (event_ratio >= 0.12)
-        & (out["net_flow_ratio"] >= 0.08)
-        & (out["vol_share"] >= 0.04)
-    )
-    out["is_distribute_long"] = (
-        (out["event_days"] >= 2)
-        & (event_ratio >= 0.12)
-        & (out["net_flow_ratio"] <= -0.08)
-        & (out["vol_share"] >= 0.04)
-    )
-
-    out["is_stealth_buy"] = (
-        (out["stealth_accum_days"] >= 2)
-        & (out["net_flow_ratio"] > 0)
-        & (out["vol_share"] < 0.08)
-    )
-    out["is_stealth_sell"] = (
-        (out["stealth_dist_days"] >= 2)
-        & (out["net_flow_ratio"] < 0)
-        & (out["vol_share"] < 0.08)
-    )
-
-    short_conditions = [
-        out["is_attack"],
-        out["is_dump"],
-        out["is_build_long"],
-        out["is_distribute_long"],
-        out["is_stealth_buy"],
-        out["is_stealth_sell"],
-        out["is_daytrade_like"],
-        out["is_nextday_like"],
-    ]
-    short_choices = NINE_CATEGORY_ORDER[:-1]
-    out["short_category"] = pd.Series(pd.NA, index=out.index, dtype="object")
-    for condition, label in zip(short_conditions, short_choices):
-        out.loc[out["short_category"].isna() & condition, "short_category"] = label
-    out["short_category"] = out["short_category"].fillna("無明顯主力活動")
-
-    long_conditions = [
-        out["is_attack"] & (event_ratio >= 0.10),
-        out["is_dump"] & (event_ratio >= 0.10),
-        out["is_build_long"] & (~out["is_attack"]),
-        out["is_distribute_long"] & (~out["is_dump"]),
-        out["is_stealth_buy"],
-        out["is_stealth_sell"],
-        out["is_daytrade_like"] & (event_ratio >= 0.10),
-        out["is_nextday_like"] & (event_ratio >= 0.10),
-    ]
-    out["long_category"] = pd.Series(pd.NA, index=out.index, dtype="object")
-    for condition, label in zip(long_conditions, short_choices):
-        out.loc[out["long_category"].isna() & condition, "long_category"] = label
-    out["long_category"] = out["long_category"].fillna("無明顯主力活動")
-
-    out["short_score"] = (
-        out["anomaly_score"] * 0.5
-        + out["event_days"].clip(upper=10) * 3.0
-        + (out["net_flow_ratio"].abs() * 100).clip(upper=20)
-    ).round(2)
-    out["long_score"] = (
-        out["anomaly_score"] * 0.4
-        + (event_ratio * 100).clip(upper=30)
-        + (out["vol_share"] * 100).clip(upper=20)
-        + (out["net_flow_ratio"].abs() * 100).clip(upper=20)
-    ).round(2)
+    out["holding_style"] = "長線持有"
+    out.loc[
+        out["is_daytrade_like"]
+        | out["is_nextday_like"]
+        | (event_ratio < 0.12)
+        | (out["event_days"] <= 2),
+        "holding_style",
+    ] = "短線進出"
 
     return out
-
-
-def _render_nine_category_tab(df: pd.DataFrame, *, category_col: str, score_col: str, title_prefix: str) -> None:
-    st.caption(f"{title_prefix}以九大類型分組，組內依分數高到低排序。")
-    ranking_cols = [
-        "branch_id",
-        "branch_name",
-        score_col,
-        "anomaly_score",
-        "event_days",
-        "net_flow_ratio",
-        "vol_share",
-        "dominant_action",
-    ]
-
-    for category in NINE_CATEGORY_ORDER:
-        subset = df[df[category_col] == category].copy()
-        subset = subset.sort_values([score_col, "anomaly_score", "event_days"], ascending=[False, False, False])
-        st.markdown(f"#### {category}（{len(subset)} 個分點）")
-        if subset.empty:
-            st.caption("目前區間內沒有符合條件的分點。")
-            continue
-        st.dataframe(
-            _format_main_table(subset[ranking_cols]),
-            use_container_width=True,
-            hide_index=True,
-        )
 
 def _load_branch_raw(conn, sid: str, start_date: str, end_date: str) -> pd.DataFrame:
     sql = """
@@ -359,8 +244,8 @@ def show_branch_anomaly():
         )
 
         anomaly_events, watchlist, weekly_report = build_anomaly_outputs(raw_df, detector_cfg)
-        classified_events = _build_long_short_labels(anomaly_events)
-        classified_watchlist = _build_long_short_labels(watchlist) if not watchlist.empty else watchlist
+        classified_events = _build_holding_style(anomaly_events)
+        classified_watchlist = _build_holding_style(watchlist) if not watchlist.empty else watchlist
         st.session_state[state_key] = {
             "sid": sid,
             "start_d": str(start_d),
@@ -433,8 +318,8 @@ def show_branch_anomaly():
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["異常排行榜", "追蹤名單", "深度欄位", "每週摘要", "當沖分點"])
 
     with tab1:
-        st.caption("短線 / 長線分類直接合併到同一個異常排行榜，方便一次比對。")
-        ranking_cols = main_cols + ["short_category", "short_score", "long_category", "long_score"]
+        st.caption("新增持有週期欄位：僅顯示長線持有或短線進出。")
+        ranking_cols = main_cols + ["holding_style"]
         st.dataframe(
             _format_main_table(filtered_events[ranking_cols].head(int(top_n))),
             use_container_width=True,
@@ -511,7 +396,7 @@ def show_branch_anomaly():
     with tab5:
         st.caption("當沖風格分點清單：挑出同時有偏買/偏賣，且淨流向接近中性的分點。")
         daytrade_df = filtered_events[
-            filtered_events["is_daytrade_like"] | (filtered_events["short_category"] == "當沖主導")
+            filtered_events["is_daytrade_like"]
         ].copy()
         daytrade_cols = [
             "branch_id",
@@ -522,17 +407,14 @@ def show_branch_anomaly():
             "sell_event_days",
             "net_flow_ratio",
             "vol_share",
-            "short_category",
-            "short_score",
-            "long_category",
-            "long_score",
+            "holding_style",
             "dominant_action",
         ]
         if daytrade_df.empty:
             st.info("目前條件下沒有符合當沖主導的分點。")
         else:
             daytrade_df = daytrade_df.sort_values(
-                ["short_score", "long_score", "anomaly_score", "event_days"],
+                ["anomaly_score", "event_days", "buy_event_days", "sell_event_days"],
                 ascending=[False, False, False, False],
             )
             st.dataframe(
