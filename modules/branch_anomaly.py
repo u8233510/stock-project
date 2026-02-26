@@ -111,14 +111,28 @@ def _build_holding_style(events_df: pd.DataFrame) -> pd.DataFrame:
         & (out["net_flow_ratio"].abs() <= 0.08)
     )
 
-    out["holding_style"] = "長線持有"
-    out.loc[
+    sustained_signal = (
+        (out["event_days"] >= 4)
+        & (event_ratio >= 0.12)
+        & (out["vol_share"] >= 0.04)
+        & (
+            (out["net_flow_ratio"].abs() >= 0.08)
+            | out["flag_accumulation"]
+            | out["flag_distribution"]
+            | (out["stealth_accum_days"] >= 2)
+            | (out["stealth_dist_days"] >= 2)
+        )
+    )
+
+    short_term_signal = (
         out["is_daytrade_like"]
         | out["is_nextday_like"]
-        | (event_ratio < 0.12)
-        | (out["event_days"] <= 2),
-        "holding_style",
-    ] = "短線進出"
+        | (out["event_days"] <= 2)
+        | ((event_ratio < 0.08) & (out["net_flow_ratio"].abs() < 0.08))
+    )
+
+    out["holding_style"] = "短線進出"
+    out.loc[sustained_signal & ~short_term_signal, "holding_style"] = "長線持有"
 
     return out
 
