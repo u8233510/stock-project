@@ -15,6 +15,7 @@ COLUMN_LABELS = {
     "peak_score": "區間最高分",
     "stock_id": "股票代號",
     "branch_id": "分點代號",
+    "branch_name": "分點名稱",
     "anomaly_score": "異常分數",
     "anomaly_level": "異常等級",
     "z_net_20": "淨買賣量 Z 分數(20日)",
@@ -213,6 +214,7 @@ def _render_nine_category_tab(df: pd.DataFrame, *, category_col: str, score_col:
     st.caption(f"{title_prefix}以九大類型分組，組內依分數高到低排序。")
     ranking_cols = [
         "branch_id",
+        "branch_name",
         score_col,
         "anomaly_score",
         "event_days",
@@ -240,6 +242,7 @@ def _load_branch_raw(conn, sid: str, start_date: str, end_date: str) -> pd.DataF
         b.stock_id,
         b.date,
         b.securities_trader_id AS branch_id,
+        b.securities_trader AS branch_name,
         b.price,
         b.buy,
         b.sell,
@@ -378,8 +381,8 @@ def show_branch_anomaly():
     filtered_events = filtered_events[filtered_events["event_days"] >= min_event_days]
 
     main_cols = [
-        "stock_id",
         "branch_id",
+        "branch_name",
         "anomaly_score",
         "anomaly_level",
         "dominant_action",
@@ -391,8 +394,8 @@ def show_branch_anomaly():
     ]
 
     detail_cols = [
-        "stock_id",
         "branch_id",
+        "branch_name",
         "avg_score",
         "peak_score",
         "z_net_20",
@@ -458,7 +461,16 @@ def show_branch_anomaly():
                 ascending=[False, False, False, False],
             )
 
-            weekly_localized = _localize_table(weekly_filtered)
+            weekly_display_cols = [
+                "week",
+                "anomaly_level",
+                "events",
+                "avg_score",
+                "adj_avg_score",
+                "avg_vol_share",
+                "adj_avg_vol_share",
+            ]
+            weekly_localized = _localize_table(weekly_filtered[weekly_display_cols])
             st.caption("已套用穩健分數：事件筆數少的週別會被平滑，避免 1 筆極端值衝到最前面。")
             st.dataframe(
                 weekly_localized.style.format(

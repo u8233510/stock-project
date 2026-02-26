@@ -43,6 +43,7 @@ def prepare_branch_daily_features(
     stock_col: str = "stock_id",
     date_col: str = "date",
     branch_col: str = "branch_id",
+    branch_name_col: str = "branch_name",
     price_col: str = "price",
     buy_col: str = "buy",
     sell_col: str = "sell",
@@ -51,9 +52,9 @@ def prepare_branch_daily_features(
     """Build daily features at (stock, date, branch) granularity.
 
     Expected columns in raw_df:
-    - stock_id/date/branch_id/price/buy/sell/close
+    - stock_id/date/branch_id/branch_name/price/buy/sell/close
     """
-    _validate_columns(raw_df, [stock_col, date_col, branch_col, price_col, buy_col, sell_col, close_col])
+    _validate_columns(raw_df, [stock_col, date_col, branch_col, branch_name_col, price_col, buy_col, sell_col, close_col])
 
     df = raw_df.copy()
     df[date_col] = pd.to_datetime(df[date_col])
@@ -68,6 +69,7 @@ def prepare_branch_daily_features(
     grouped = (
         df.groupby([stock_col, date_col, branch_col], as_index=False)
         .agg(
+            branch_name=(branch_name_col, "last"),
             buy=(buy_col, "sum"),
             sell=(sell_col, "sum"),
             gross_vol=("trade_volume", "sum"),
@@ -225,6 +227,7 @@ def build_anomaly_outputs(
     interval_summary = (
         scored.groupby(["stock_id", "branch_id"], as_index=False)
         .agg(
+            branch_name=("branch_name", "last"),
             start_date=("date", "min"),
             end_date=("date", "max"),
             observed_days=("date", "nunique"),
