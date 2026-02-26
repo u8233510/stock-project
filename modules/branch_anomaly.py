@@ -429,13 +429,21 @@ def show_branch_anomaly():
         "observed_days",
     ]
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["異常排行榜", "追蹤名單", "深度欄位", "每週摘要", "短線九大分類", "長線九大分類"])
+    tab1, tab2, tab3, tab4 = st.tabs(["異常排行榜", "追蹤名單", "深度欄位", "每週摘要"])
 
     with tab1:
         st.dataframe(
             _format_main_table(filtered_events[main_cols].head(int(top_n))),
             use_container_width=True,
         )
+
+        st.divider()
+        st.markdown("#### 九大分類（整合檢視）")
+        category_tab1, category_tab2 = st.tabs(["短線分類", "長線分類"])
+        with category_tab1:
+            _render_nine_category_tab(filtered_events, category_col="short_category", score_col="short_score", title_prefix="短線")
+        with category_tab2:
+            _render_nine_category_tab(filtered_events, category_col="long_category", score_col="long_score", title_prefix="長線")
 
     with tab2:
         watch_filtered = classified_watchlist.copy()
@@ -504,9 +512,3 @@ def show_branch_anomaly():
                 ),
                 use_container_width=True,
             )
-
-    with tab5:
-        _render_nine_category_tab(filtered_events, category_col="short_category", score_col="short_score", title_prefix="短線")
-
-    with tab6:
-        _render_nine_category_tab(filtered_events, category_col="long_category", score_col="long_score", title_prefix="長線")
