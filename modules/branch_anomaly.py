@@ -39,6 +39,7 @@ COLUMN_LABELS = {
     "long_category": "長線分類",
     "short_score": "短線分數",
     "long_score": "長線分數",
+    "is_daytrade_like": "當沖主導",
 }
 
 LEVEL_LABELS = {
@@ -429,21 +430,15 @@ def show_branch_anomaly():
         "observed_days",
     ]
 
-    tab1, tab2, tab3, tab4 = st.tabs(["異常排行榜", "追蹤名單", "深度欄位", "每週摘要"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["異常排行榜", "追蹤名單", "深度欄位", "每週摘要", "當沖分點"])
 
     with tab1:
+        st.caption("短線 / 長線分類直接合併到同一個異常排行榜，方便一次比對。")
+        ranking_cols = main_cols + ["short_category", "short_score", "long_category", "long_score"]
         st.dataframe(
-            _format_main_table(filtered_events[main_cols].head(int(top_n))),
+            _format_main_table(filtered_events[ranking_cols].head(int(top_n))),
             use_container_width=True,
         )
-
-        st.divider()
-        st.markdown("#### 九大分類（整合檢視）")
-        category_tab1, category_tab2 = st.tabs(["短線分類", "長線分類"])
-        with category_tab1:
-            _render_nine_category_tab(filtered_events, category_col="short_category", score_col="short_score", title_prefix="短線")
-        with category_tab2:
-            _render_nine_category_tab(filtered_events, category_col="long_category", score_col="long_score", title_prefix="長線")
 
     with tab2:
         watch_filtered = classified_watchlist.copy()
@@ -511,4 +506,37 @@ def show_branch_anomaly():
                     }
                 ),
                 use_container_width=True,
+            )
+
+    with tab5:
+        st.caption("當沖風格分點清單：挑出同時有偏買/偏賣，且淨流向接近中性的分點。")
+        daytrade_df = filtered_events[
+            filtered_events["is_daytrade_like"] | (filtered_events["short_category"] == "當沖主導")
+        ].copy()
+        daytrade_cols = [
+            "branch_id",
+            "branch_name",
+            "anomaly_score",
+            "event_days",
+            "buy_event_days",
+            "sell_event_days",
+            "net_flow_ratio",
+            "vol_share",
+            "short_category",
+            "short_score",
+            "long_category",
+            "long_score",
+            "dominant_action",
+        ]
+        if daytrade_df.empty:
+            st.info("目前條件下沒有符合當沖主導的分點。")
+        else:
+            daytrade_df = daytrade_df.sort_values(
+                ["short_score", "long_score", "anomaly_score", "event_days"],
+                ascending=[False, False, False, False],
+            )
+            st.dataframe(
+                _format_main_table(daytrade_df[daytrade_cols].head(int(top_n))),
+                use_container_width=True,
+                hide_index=True,
             )
