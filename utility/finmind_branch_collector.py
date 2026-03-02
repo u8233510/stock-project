@@ -151,6 +151,11 @@ def fetch_trader_info(api: DataLoader, branch_id: str) -> pd.DataFrame:
     return api.taiwan_securities_trader_info(securities_trader_id=str(branch_id))
 
 
+def fetch_all_trader_info(api: DataLoader) -> pd.DataFrame:
+    """Fetch full trader list from FinMind for bootstrap/manual refresh."""
+    return api.taiwan_securities_trader_info()
+
+
 def normalize_trader_info_df(df: pd.DataFrame, branch_id: str) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=["securities_trader_id", "securities_trader", "date", "address", "phone"])
@@ -246,6 +251,80 @@ def write_branch_sync_log(conn: sqlite3.Connection, stat: FetchStats):
     )
 
 
+def _retry_api_call(func: Callable[[], pd.DataFrame], max_retries: int, retry_sleep_sec: float) -> pd.DataFrame:
+    attempts = max(int(max_retries or 0), 0) + 1
+    last_exc: Exception | None = None
+    for idx in range(attempts):
+        try:
+            return func()
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if idx >= attempts - 1:
+                break
+            time.sleep(max(float(retry_sleep_sec or 0.0), 0.0))
+    if last_exc is not None:
+        raise last_exc
+    return pd.DataFrame()
+
+
+def refresh_trader_info(
+    token: str,
+    sqlite_path: Path | None,
+    raw_dir: Path,
+    branch_ids: list[str] | None = None,
+    sleep_sec: float = 0.2,
+    max_retries: int = 2,
+    retry_sleep_sec: float = 1.0,
+    progress_callback: Callable[[str], None] | None = None,
+) -> pd.DataFrame:
+    """Manual task: download branch master data into DB/CSV."""
+    api = DataLoader()
+    api.login_by_token(api_token=token)
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    conn = sqlite3.connect(sqlite_path) if sqlite_path else None
+    try:
+        if conn is not None:
+            ensure_branch_tables(conn)
+
+        if branch_ids:
+            info_frames = []
+            total = len(branch_ids)
+            for idx, branch_id in enumerate(branch_ids, start=1):
+                if progress_callback:
+                    progress_callback(f"[{idx}/{total}] 下載分點基本資料: {branch_id}")
+                df = _retry_api_call(
+                    lambda b=branch_id: fetch_trader_info(api, b),
+                    max_retries=max_retries,
+                    retry_sleep_sec=retry_sleep_sec,
+                )
+                clean_df = normalize_trader_info_df(df, branch_id=branch_id)
+                if not clean_df.empty:
+                    info_frames.append(clean_df)
+                time.sleep(max(float(sleep_sec or 0.0), 0.0))
+            all_info_df = pd.concat(info_frames, ignore_index=True) if info_frames else pd.DataFrame()
+        else:
+            if progress_callback:
+                progress_callback("下載全部分點基本資料中...")
+            all_info_df = _retry_api_call(
+                lambda: fetch_all_trader_info(api),
+                max_retries=max_retries,
+                retry_sleep_sec=retry_sleep_sec,
+            )
+            all_info_df = normalize_trader_info_df(all_info_df, branch_id="")
+
+        if conn is not None and not all_info_df.empty:
+            upsert_trader_info_df(conn, all_info_df)
+            conn.commit()
+
+        if not all_info_df.empty:
+            all_info_df.to_csv(raw_dir / "trader_info_snapshot.csv", index=False, encoding="utf-8-sig")
+        return all_info_df
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def run_collection(
     token: str,
     branch_ids: list[str],
@@ -256,6 +335,8 @@ def run_collection(
     sleep_sec: float,
     retry_notrade_days: int,
     refresh_trader_info: bool,
+    max_retries: int = 2,
+    retry_sleep_sec: float = 1.0,
     progress_callback: Callable[[str], None] | None = None,
 ) -> pd.DataFrame:
     api = DataLoader()
@@ -280,7 +361,11 @@ def run_collection(
 
         for branch_id in branch_ids:
             try:
-                info_df = fetch_trader_info(api, branch_id)
+                info_df = _retry_api_call(
+                    lambda b=branch_id: fetch_trader_info(api, b),
+                    max_retries=max_retries,
+                    retry_sleep_sec=retry_sleep_sec,
+                )
                 clean_info_df = normalize_trader_info_df(info_df, branch_id=branch_id)
                 if not clean_info_df.empty:
                     valid_branch_ids.add(branch_id)
@@ -332,7 +417,11 @@ def run_collection(
                     continue
 
                 try:
-                    raw_df = fetch_branch_day(api, branch_id=branch_id, trade_date=trade_date)
+                    raw_df = _retry_api_call(
+                        lambda b=branch_id, d=trade_date: fetch_branch_day(api, branch_id=b, trade_date=d),
+                        max_retries=max_retries,
+                        retry_sleep_sec=retry_sleep_sec,
+                    )
                     clean_df = normalize_branch_df(raw_df, branch_id=branch_id, trade_date=trade_date)
 
                     raw_file = raw_dir / f"{trade_date}_{branch_id}.csv"
@@ -395,6 +484,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="執行前清空 securities_trader_info，並重抓分點基本資料",
     )
+    parser.add_argument("--max-retries", type=int, default=2, help="API 失敗重試次數")
+    parser.add_argument("--retry-sleep-sec", type=float, default=1.0, help="API 重試等待秒數")
     return parser.parse_args()
 
 
@@ -412,6 +503,8 @@ def main():
         sleep_sec=args.sleep_sec,
         retry_notrade_days=args.retry_notrade_days,
         refresh_trader_info=args.refresh_trader_info,
+        max_retries=args.max_retries,
+        retry_sleep_sec=args.retry_sleep_sec,
     )
 
 
