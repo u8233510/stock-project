@@ -337,12 +337,16 @@ def run_collection(
     refresh_trader_info: bool,
     max_retries: int = 2,
     retry_sleep_sec: float = 1.0,
+    commit_interval: int = 100,
     progress_callback: Callable[[str], None] | None = None,
 ) -> pd.DataFrame:
     api = DataLoader()
     api.login_by_token(api_token=token)
 
     conn = sqlite3.connect(sqlite_path) if sqlite_path else None
+    if conn is not None:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
     raw_dir.mkdir(parents=True, exist_ok=True)
 
     stats: list[FetchStats] = []
@@ -350,6 +354,16 @@ def run_collection(
     done_jobs = 0
     valid_branch_ids: set[str] = set()
     invalid_branch_reason: dict[str, str] = {}
+    pending_commit_ops = 0
+    commit_interval = max(1, int(commit_interval or 1))
+
+    def _flush_if_needed(force: bool = False):
+        nonlocal pending_commit_ops
+        if conn is None:
+            return
+        if force or pending_commit_ops >= commit_interval:
+            conn.commit()
+            pending_commit_ops = 0
 
     try:
         if conn is not None:
@@ -357,7 +371,8 @@ def run_collection(
 
         if conn is not None and refresh_trader_info:
             conn.execute("DELETE FROM securities_trader_info")
-            conn.commit()
+            pending_commit_ops += 1
+            _flush_if_needed(force=True)
 
         if not refresh_trader_info:
             # 正常流程下 branch_ids 來自 securities_trader_info，逐筆驗證會造成 990+ 次 API 呼叫，
@@ -397,7 +412,8 @@ def run_collection(
                             branch_id="",
                         )
                         upsert_trader_info_df(conn, clean_info_df)
-                        conn.commit()
+                        pending_commit_ops += 1
+                        _flush_if_needed(force=True)
             except Exception as exc:  # noqa: BLE001
                 for branch_id in branch_ids:
                     invalid_branch_reason[str(branch_id)] = f"驗證分點代碼失敗: {exc}"
@@ -443,7 +459,8 @@ def run_collection(
                     )
                     if conn is not None:
                         write_branch_sync_log(conn, stat)
-                        conn.commit()
+                        pending_commit_ops += 1
+                        _flush_if_needed()
                     stats.append(stat)
                     done_jobs += 1
                     continue
@@ -466,17 +483,20 @@ def run_collection(
                     if conn is not None:
                         upsert_branch_detail_df(conn, clean_df)
                         write_branch_sync_log(conn, stat)
-                        conn.commit()
+                        pending_commit_ops += 1
+                        _flush_if_needed()
                 except Exception as exc:  # noqa: BLE001
                     stat = FetchStats(branch_id, trade_date, 0, "Failed", str(exc))
                     if conn is not None:
                         write_branch_sync_log(conn, stat)
-                        conn.commit()
+                        pending_commit_ops += 1
+                        _flush_if_needed()
                 stats.append(stat)
                 done_jobs += 1
                 time.sleep(max(sleep_sec, 0.0))
     finally:
         if conn is not None:
+            _flush_if_needed(force=True)
             conn.close()
 
     stat_df = pd.DataFrame([s.__dict__ for s in stats])
@@ -518,6 +538,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-retries", type=int, default=2, help="API 失敗重試次數")
     parser.add_argument("--retry-sleep-sec", type=float, default=1.0, help="API 重試等待秒數")
+    parser.add_argument("--commit-interval", type=int, default=100, help="每 N 筆寫入才 commit 一次")
     return parser.parse_args()
 
 
@@ -537,6 +558,7 @@ def main():
         refresh_trader_info=args.refresh_trader_info,
         max_retries=args.max_retries,
         retry_sleep_sec=args.retry_sleep_sec,
+        commit_interval=args.commit_interval,
     )
 
 
