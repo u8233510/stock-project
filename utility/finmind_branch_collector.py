@@ -49,6 +49,75 @@ def daterange(start_date: str, end_date: str):
         cursor += timedelta(days=1)
 
 
+def _get_known_holidays(conn: sqlite3.Connection, branch_id: str | None = None) -> set[datetime.date]:
+    sql = "SELECT DISTINCT date FROM branch_sync_log WHERE status = 'NoTrade'"
+    params: list[str] = []
+    if branch_id is not None:
+        sql += " AND securities_trader_id = ?"
+        params.append(str(branch_id))
+
+    rows = conn.execute(sql, params).fetchall()
+    holidays: set[datetime.date] = set()
+    for row in rows:
+        try:
+            holidays.add(datetime.strptime(str(row[0])[:10], "%Y-%m-%d").date())
+        except Exception:
+            continue
+    return holidays
+
+
+def _get_pending_dates_for_branch(
+    conn: sqlite3.Connection,
+    branch_id: str,
+    start_date: str,
+    end_date: str,
+    retry_notrade_days: int,
+) -> list[datetime.date]:
+    today = datetime.now().date()
+    t_start = datetime.strptime(start_date, "%Y-%m-%d").date()
+    t_end = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+    candidate_dates = list(pd.date_range(start=t_start, end=t_end, freq="B").date)
+    if not candidate_dates:
+        return []
+
+    retry_cutoff = today - timedelta(days=max(int(retry_notrade_days or 0), 0))
+    holidays = _get_known_holidays(conn, branch_id=branch_id)
+    candidate_dates = [
+        d
+        for d in candidate_dates
+        if d == today or d >= retry_cutoff or d not in holidays
+    ]
+    if not candidate_dates:
+        return []
+
+    min_date = candidate_dates[0].strftime("%Y-%m-%d")
+    max_date = candidate_dates[-1].strftime("%Y-%m-%d")
+    rows = conn.execute(
+        """
+        SELECT date, status
+        FROM branch_sync_log
+        WHERE securities_trader_id = ?
+          AND api_name = ?
+          AND date >= ?
+          AND date <= ?
+        """,
+        (str(branch_id), API_NAME, min_date, max_date),
+    ).fetchall()
+
+    status_map = {str(d)[:10]: s for d, s in rows if d}
+    pending_dates: list[datetime.date] = []
+    for d in candidate_dates:
+        d_str = d.strftime("%Y-%m-%d")
+        status = status_map.get(d_str)
+        if status == "Success":
+            continue
+        if d != today and status == "NoTrade" and d < retry_cutoff:
+            continue
+        pending_dates.append(d)
+    return pending_dates
+
+
 def normalize_branch_df(df: pd.DataFrame, branch_id: str, trade_date: str) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=REQUIRED_COLUMNS)
@@ -185,6 +254,8 @@ def run_collection(
     raw_dir: Path,
     sqlite_path: Path | None,
     sleep_sec: float,
+    retry_notrade_days: int,
+    refresh_trader_info: bool,
     progress_callback: Callable[[str], None] | None = None,
 ) -> pd.DataFrame:
     api = DataLoader()
@@ -203,6 +274,10 @@ def run_collection(
         if conn is not None:
             ensure_branch_tables(conn)
 
+        if conn is not None and refresh_trader_info:
+            conn.execute("DELETE FROM securities_trader_info")
+            conn.commit()
+
         for branch_id in branch_ids:
             try:
                 info_df = fetch_trader_info(api, branch_id)
@@ -219,8 +294,24 @@ def run_collection(
             except Exception as exc:  # noqa: BLE001
                 invalid_branch_reason[branch_id] = f"驗證分點代碼失敗: {exc}"
 
+        pending_by_branch: dict[str, set[str]] = {}
+        if conn is not None:
+            for branch_id in branch_ids:
+                pending_dates = _get_pending_dates_for_branch(
+                    conn,
+                    branch_id=branch_id,
+                    start_date=start_date,
+                    end_date=end_date,
+                    retry_notrade_days=retry_notrade_days,
+                )
+                pending_by_branch[branch_id] = {d.isoformat() for d in pending_dates}
+
         for trade_date in daterange(start_date, end_date):
             for branch_id in branch_ids:
+                if conn is not None and trade_date not in pending_by_branch.get(branch_id, set()):
+                    done_jobs += 1
+                    continue
+
                 msg = f"[{done_jobs + 1}/{total_jobs}] branch={branch_id}, date={trade_date}"
                 if progress_callback:
                     progress_callback(msg)
@@ -230,7 +321,7 @@ def run_collection(
                         branch_id,
                         trade_date,
                         0,
-                        "error",
+                        "Failed",
                         invalid_branch_reason.get(branch_id, "分點代碼驗證未通過"),
                     )
                     if conn is not None:
@@ -247,13 +338,16 @@ def run_collection(
                     raw_file = raw_dir / f"{trade_date}_{branch_id}.csv"
                     clean_df.to_csv(raw_file, index=False, encoding="utf-8-sig")
 
-                    stat = FetchStats(branch_id, trade_date, len(clean_df), "ok")
+                    if clean_df.empty:
+                        stat = FetchStats(branch_id, trade_date, 0, "NoTrade")
+                    else:
+                        stat = FetchStats(branch_id, trade_date, len(clean_df), "Success")
                     if conn is not None:
                         upsert_branch_detail_df(conn, clean_df)
                         write_branch_sync_log(conn, stat)
                         conn.commit()
                 except Exception as exc:  # noqa: BLE001
-                    stat = FetchStats(branch_id, trade_date, 0, "error", str(exc))
+                    stat = FetchStats(branch_id, trade_date, 0, "Failed", str(exc))
                     if conn is not None:
                         write_branch_sync_log(conn, stat)
                         conn.commit()
@@ -267,8 +361,8 @@ def run_collection(
     stat_df = pd.DataFrame([s.__dict__ for s in stats])
     stat_df.to_csv(raw_dir / "fetch_log.csv", index=False, encoding="utf-8-sig")
 
-    ok = int((stat_df["status"] == "ok").sum()) if not stat_df.empty else 0
-    err = int((stat_df["status"] == "error").sum()) if not stat_df.empty else 0
+    ok = int((stat_df["status"] == "Success").sum()) if not stat_df.empty else 0
+    err = int((stat_df["status"] == "Failed").sum()) if not stat_df.empty else 0
     print(f"Done. success={ok}, error={err}, log={raw_dir / 'fetch_log.csv'}")
     return stat_df
 
@@ -290,6 +384,17 @@ def parse_args() -> argparse.Namespace:
         help="Optional sqlite path for upsert (use empty string to disable)",
     )
     parser.add_argument("--sleep-sec", type=float, default=0.2, help="Sleep seconds between API calls")
+    parser.add_argument(
+        "--retry-notrade-days",
+        type=int,
+        default=14,
+        help="NoTrade 幾天後才視為穩定休市，不再重試",
+    )
+    parser.add_argument(
+        "--refresh-trader-info",
+        action="store_true",
+        help="執行前清空 securities_trader_info，並重抓分點基本資料",
+    )
     return parser.parse_args()
 
 
@@ -305,6 +410,8 @@ def main():
         raw_dir=Path(args.raw_dir),
         sqlite_path=sqlite_path,
         sleep_sec=args.sleep_sec,
+        retry_notrade_days=args.retry_notrade_days,
+        refresh_trader_info=args.refresh_trader_info,
     )
 
 

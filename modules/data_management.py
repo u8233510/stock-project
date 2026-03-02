@@ -67,6 +67,8 @@ def show_data_management():
             default_end - timedelta(days=7),
         )
         default_sleep = float(branch_sync_cfg.get("sleep_seconds", 0.2) or 0.2)
+        retry_notrade_days = int(branch_sync_cfg.get("retry_notrade_days", (cfg.get("ingest") or {}).get("retry_notrade_days", 14)))
+        default_refresh_info = bool(branch_sync_cfg.get("refresh_trader_info", False))
 
         col1, col2 = st.columns(2)
         with col1:
@@ -87,6 +89,11 @@ def show_data_management():
                 max_value=5.0,
                 value=max(0.0, min(5.0, default_sleep)),
                 step=0.1,
+            )
+            refresh_trader_info = st.checkbox(
+                "執行前清空分點基本資料後重建",
+                value=default_refresh_info,
+                help="勾選後會先清空 securities_trader_info，再重新抓取分點基本資料。",
             )
 
         if st.button("🚀 啟動分點明細同步", use_container_width=True):
@@ -111,10 +118,12 @@ def show_data_management():
                     raw_dir=Path(raw_dir),
                     sqlite_path=Path(sqlite_path) if sqlite_path.strip() else None,
                     sleep_sec=float(sleep_sec),
+                    retry_notrade_days=retry_notrade_days,
+                    refresh_trader_info=refresh_trader_info,
                     progress_callback=lambda msg: progress.info(msg),
                 )
 
-            ok = int((stats["status"] == "ok").sum()) if not stats.empty else 0
-            err = int((stats["status"] == "error").sum()) if not stats.empty else 0
+            ok = int((stats["status"] == "Success").sum()) if not stats.empty else 0
+            err = int((stats["status"] == "Failed").sum()) if not stats.empty else 0
             st.success(f"同步完成：成功 {ok} 筆，失敗 {err} 筆")
             st.dataframe(stats.tail(200), use_container_width=True)
