@@ -4,7 +4,7 @@ import database
 import math
 
 TABLE_CHINESE_MAP = {
-    "ingest_log": "資料同步紀錄", "branch_price_daily": "分點進出明細",
+    "ingest_log": "資料同步紀錄", "branch_price_daily": "分點進出明細(依股票)", "branch_trader_daily_detail": "分點每日交易明細(依分點)",
     "stock_ohlcv_daily": "每日股價行情", "institutional_investors_daily": "三大法人買賣超",
     "margin_short_daily": "融資融券餘額", "stock_financial_statements": "財務報表 (原始長表)",
     "stock_day_trading_daily": "當沖交易統計", "stock_per_pbr_daily": "本益比/股淨比明細",

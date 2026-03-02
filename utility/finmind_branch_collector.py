@@ -28,7 +28,7 @@ REQUIRED_COLUMNS = [
     "stock_id",
     "date",
 ]
-API_NAME = "taiwan_stock_trading_daily_report"
+API_NAME = "taiwan_stock_trading_daily_report_by_trader"
 
 
 @dataclass
@@ -77,13 +77,41 @@ def fetch_branch_day(api: DataLoader, branch_id: str, trade_date: str) -> pd.Dat
     )
 
 
+def fetch_trader_info(api: DataLoader, branch_id: str) -> pd.DataFrame:
+    """Fetch trader metadata for validating branch_id and storing reference data."""
+    return api.taiwan_securities_trader_info(securities_trader_id=str(branch_id))
+
+
+def normalize_trader_info_df(df: pd.DataFrame, branch_id: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["securities_trader_id", "securities_trader", "date", "address", "phone"])
+
+    out = df.copy()
+    for col in ["securities_trader_id", "securities_trader", "date", "address", "phone"]:
+        if col not in out.columns:
+            out[col] = None
+
+    out = out[["securities_trader_id", "securities_trader", "date", "address", "phone"]].copy()
+    out["securities_trader_id"] = out["securities_trader_id"].fillna(branch_id).astype(str)
+    out["securities_trader"] = out["securities_trader"].fillna("").astype(str)
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    out["address"] = out["address"].fillna("").astype(str)
+    out["phone"] = out["phone"].fillna("").astype(str)
+    return out.drop_duplicates(subset=["securities_trader_id"], keep="last")
+
+
 def ensure_branch_tables(conn: sqlite3.Connection):
-    conn.execute(database.TABLE_REGISTRY["branch"])
+    conn.execute(database.TABLE_REGISTRY["branch_trader_daily_detail"])
+    conn.execute(database.TABLE_REGISTRY["securities_trader_info"])
+    for idx in database.INDEX_REGISTRY.get("branch_trader_daily_detail", []):
+        conn.execute(idx)
+    for idx in database.INDEX_REGISTRY.get("securities_trader_info", []):
+        conn.execute(idx)
     database.ensure_branch_sync_log_schema(conn)
     conn.commit()
 
 
-def upsert_branch_df(conn: sqlite3.Connection, df: pd.DataFrame):
+def upsert_branch_detail_df(conn: sqlite3.Connection, df: pd.DataFrame):
     if df.empty:
         return
     payload = [
@@ -100,9 +128,32 @@ def upsert_branch_df(conn: sqlite3.Connection, df: pd.DataFrame):
     ]
     conn.executemany(
         """
-        INSERT OR REPLACE INTO branch_price_daily(
+        INSERT OR REPLACE INTO branch_trader_daily_detail(
             date, stock_id, securities_trader_id, securities_trader, price, buy, sell
         ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        payload,
+    )
+
+
+def upsert_trader_info_df(conn: sqlite3.Connection, df: pd.DataFrame):
+    if df.empty:
+        return
+    payload = [
+        (
+            str(row.securities_trader_id),
+            str(row.securities_trader),
+            str(row.date) if pd.notna(row.date) else None,
+            str(row.address),
+            str(row.phone),
+        )
+        for row in df.itertuples(index=False)
+    ]
+    conn.executemany(
+        """
+        INSERT OR REPLACE INTO securities_trader_info(
+            securities_trader_id, securities_trader, date, address, phone
+        ) VALUES (?, ?, ?, ?, ?)
         """,
         payload,
     )
@@ -145,16 +196,50 @@ def run_collection(
     stats: list[FetchStats] = []
     total_jobs = len(branch_ids) * sum(1 for _ in daterange(start_date, end_date))
     done_jobs = 0
+    valid_branch_ids: set[str] = set()
+    invalid_branch_reason: dict[str, str] = {}
 
     try:
         if conn is not None:
             ensure_branch_tables(conn)
+
+        for branch_id in branch_ids:
+            try:
+                info_df = fetch_trader_info(api, branch_id)
+                clean_info_df = normalize_trader_info_df(info_df, branch_id=branch_id)
+                if not clean_info_df.empty:
+                    valid_branch_ids.add(branch_id)
+                    if conn is not None:
+                        upsert_trader_info_df(conn, clean_info_df)
+                        conn.commit()
+                else:
+                    invalid_branch_reason[branch_id] = (
+                        "查無分點基本資料，需先確認分點代碼存在，才能透過 API 抓交易明細。"
+                    )
+            except Exception as exc:  # noqa: BLE001
+                invalid_branch_reason[branch_id] = f"驗證分點代碼失敗: {exc}"
 
         for trade_date in daterange(start_date, end_date):
             for branch_id in branch_ids:
                 msg = f"[{done_jobs + 1}/{total_jobs}] branch={branch_id}, date={trade_date}"
                 if progress_callback:
                     progress_callback(msg)
+
+                if branch_id not in valid_branch_ids:
+                    stat = FetchStats(
+                        branch_id,
+                        trade_date,
+                        0,
+                        "error",
+                        invalid_branch_reason.get(branch_id, "分點代碼驗證未通過"),
+                    )
+                    if conn is not None:
+                        write_branch_sync_log(conn, stat)
+                        conn.commit()
+                    stats.append(stat)
+                    done_jobs += 1
+                    continue
+
                 try:
                     raw_df = fetch_branch_day(api, branch_id=branch_id, trade_date=trade_date)
                     clean_df = normalize_branch_df(raw_df, branch_id=branch_id, trade_date=trade_date)
@@ -164,7 +249,7 @@ def run_collection(
 
                     stat = FetchStats(branch_id, trade_date, len(clean_df), "ok")
                     if conn is not None:
-                        upsert_branch_df(conn, clean_df)
+                        upsert_branch_detail_df(conn, clean_df)
                         write_branch_sync_log(conn, stat)
                         conn.commit()
                 except Exception as exc:  # noqa: BLE001
