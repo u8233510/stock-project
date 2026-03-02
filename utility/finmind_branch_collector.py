@@ -359,29 +359,54 @@ def run_collection(
             conn.execute("DELETE FROM securities_trader_info")
             conn.commit()
 
-        for branch_id in branch_ids:
+        if not refresh_trader_info:
+            # 正常流程下 branch_ids 來自 securities_trader_info，逐筆驗證會造成 990+ 次 API 呼叫，
+            # 使用者體感會像「卡住」在 0 筆很久。此情境直接信任既有分點清單，
+            # 由後續每筆分點明細 API 回應決定 Success/Failed。
+            valid_branch_ids = {str(branch_id) for branch_id in branch_ids}
+        else:
+            if progress_callback:
+                progress_callback("正在重建分點基本資料（一次性抓取全部分點）...")
+
             try:
-                info_df = _retry_api_call(
-                    lambda b=branch_id: fetch_trader_info(api, b),
+                all_info_df = _retry_api_call(
+                    lambda: fetch_all_trader_info(api),
                     max_retries=max_retries,
                     retry_sleep_sec=retry_sleep_sec,
                 )
-                clean_info_df = normalize_trader_info_df(info_df, branch_id=branch_id)
-                if not clean_info_df.empty:
-                    valid_branch_ids.add(branch_id)
-                    if conn is not None:
+                if all_info_df is None or all_info_df.empty:
+                    invalid_reason = "FinMind 未回傳分點基本資料。"
+                    for branch_id in branch_ids:
+                        invalid_branch_reason[str(branch_id)] = invalid_reason
+                else:
+                    info_df = all_info_df.copy()
+                    info_df["securities_trader_id"] = info_df["securities_trader_id"].astype(str)
+                    available_ids = set(info_df["securities_trader_id"].dropna().astype(str))
+
+                    valid_branch_ids = {str(branch_id) for branch_id in branch_ids if str(branch_id) in available_ids}
+                    for branch_id in branch_ids:
+                        branch_id = str(branch_id)
+                        if branch_id not in valid_branch_ids:
+                            invalid_branch_reason[branch_id] = (
+                                "查無分點基本資料，需先確認分點代碼存在，才能透過 API 抓交易明細。"
+                            )
+
+                    if conn is not None and valid_branch_ids:
+                        clean_info_df = normalize_trader_info_df(
+                            info_df[info_df["securities_trader_id"].isin(valid_branch_ids)],
+                            branch_id="",
+                        )
                         upsert_trader_info_df(conn, clean_info_df)
                         conn.commit()
-                else:
-                    invalid_branch_reason[branch_id] = (
-                        "查無分點基本資料，需先確認分點代碼存在，才能透過 API 抓交易明細。"
-                    )
             except Exception as exc:  # noqa: BLE001
-                invalid_branch_reason[branch_id] = f"驗證分點代碼失敗: {exc}"
+                for branch_id in branch_ids:
+                    invalid_branch_reason[str(branch_id)] = f"驗證分點代碼失敗: {exc}"
 
         pending_by_branch: dict[str, set[str]] = {}
         if conn is not None:
-            for branch_id in branch_ids:
+            if progress_callback:
+                progress_callback("正在計算待同步日期...")
+            for idx, branch_id in enumerate(branch_ids, start=1):
                 pending_dates = _get_pending_dates_for_branch(
                     conn,
                     branch_id=branch_id,
@@ -390,14 +415,21 @@ def run_collection(
                     retry_notrade_days=retry_notrade_days,
                 )
                 pending_by_branch[branch_id] = {d.isoformat() for d in pending_dates}
+                if progress_callback and (idx == len(branch_ids) or idx % 100 == 0):
+                    progress_callback(f"待同步日期計算中：{idx}/{len(branch_ids)} 分點")
 
+            total_jobs = sum(len(v) for v in pending_by_branch.values())
+
+        if total_jobs == 0:
+            if progress_callback:
+                progress_callback("沒有需要同步的新資料（全部已是最新或在免重試期間）。")
+        
         for trade_date in daterange(start_date, end_date):
             for branch_id in branch_ids:
                 if conn is not None and trade_date not in pending_by_branch.get(branch_id, set()):
-                    done_jobs += 1
                     continue
 
-                msg = f"[{done_jobs + 1}/{total_jobs}] branch={branch_id}, date={trade_date}"
+                msg = f"[{done_jobs + 1}/{max(total_jobs, 1)}] branch={branch_id}, date={trade_date}"
                 if progress_callback:
                     progress_callback(msg)
 
