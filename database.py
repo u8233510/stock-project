@@ -149,6 +149,17 @@ TABLE_REGISTRY = {
             status TEXT,
             updated_at TEXT,
             PRIMARY KEY (date, stock_id, api_name)
+        );""",
+    "branch_sync_log": """
+        CREATE TABLE IF NOT EXISTS branch_sync_log (
+            date TEXT NOT NULL,
+            securities_trader_id TEXT NOT NULL,
+            api_name TEXT NOT NULL DEFAULT 'taiwan_stock_trading_daily_report',
+            row_count INTEGER DEFAULT 0,
+            status TEXT,
+            message TEXT,
+            updated_at TEXT,
+            PRIMARY KEY (date, securities_trader_id, api_name)
         );"""
 }
 
@@ -160,7 +171,10 @@ INDEX_REGISTRY = {
     "financial_statements": ["CREATE INDEX IF NOT EXISTS idx_fs_stock_date ON stock_financial_statements(stock_id, date);"],
     "ohlcv_minute": ["CREATE INDEX IF NOT EXISTS idx_min_stock_date ON stock_ohlcv_minute(stock_id, date_time);"],
     "active_flow_daily": ["CREATE INDEX IF NOT EXISTS idx_flow_stock_date ON stock_active_flow_daily(stock_id, date);"],
-    "branch_weighted_cost": ["CREATE INDEX IF NOT EXISTS idx_cost_lookup ON branch_weighted_cost(stock_id);"]
+    "branch_weighted_cost": ["CREATE INDEX IF NOT EXISTS idx_cost_lookup ON branch_weighted_cost(stock_id);"],
+    "branch_sync_log": [
+        "CREATE INDEX IF NOT EXISTS idx_branch_sync_status_date ON branch_sync_log(status, date);"
+    ],
 }
 
 # -----------------------------
@@ -237,6 +251,14 @@ def ensure_data_ingest_log_schema(conn):
         """
     )
     conn.execute("DROP TABLE data_ingest_log_old")
+    conn.commit()
+
+
+def ensure_branch_sync_log_schema(conn):
+    """確保 branch_sync_log 表存在（供分點明細同步任務使用）。"""
+    conn.execute(TABLE_REGISTRY["branch_sync_log"])
+    for idx in INDEX_REGISTRY.get("branch_sync_log", []):
+        conn.execute(idx)
     conn.commit()
 
 # -----------------------------
