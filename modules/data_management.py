@@ -1,6 +1,7 @@
 import streamlit as st
 from pathlib import Path
 from datetime import date, timedelta
+import sqlite3
 
 import database
 import ingest_manager
@@ -17,9 +18,37 @@ def _parse_iso_date(value: str | None, fallback: date) -> date:
         return fallback
 
 
+def _get_finmind_token(cfg: dict) -> str:
+    return str(((cfg.get("finmind") or {}).get("api_token") or "")).strip()
+
+
+def _load_branch_ids_from_db(sqlite_path: str) -> list[str]:
+    if not sqlite_path or not sqlite_path.strip():
+        return []
+
+    conn = sqlite3.connect(sqlite_path.strip())
+    try:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT securities_trader_id
+            FROM securities_trader_info
+            WHERE securities_trader_id IS NOT NULL
+              AND TRIM(securities_trader_id) <> ''
+            ORDER BY securities_trader_id
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+
+    return [str(row[0]).strip() for row in rows if row and str(row[0]).strip()]
+
+
 def show_data_management():
     st.header("⚙️ 資料同步管理中心")
     cfg = database.load_config()
+    finmind_token = _get_finmind_token(cfg)
 
     task_type = st.radio(
         "請選擇要啟動的執行案件：",
@@ -68,7 +97,7 @@ def show_data_management():
 
         col1, col2 = st.columns(2)
         with col1:
-            token = st.text_input("FinMind Token", type="password", key="trader_info_token")
+            st.caption("FinMind Token 由 config.json 的 finmind.api_token 自動帶入")
             download_mode = st.radio(
                 "下載模式",
                 ["全部分點", "指定分點"],
@@ -111,8 +140,8 @@ def show_data_management():
             )
 
         if st.button("🚀 啟動分點基本資料下載", use_container_width=True):
-            if not token.strip():
-                st.error("請先輸入 FinMind Token。")
+            if not finmind_token:
+                st.error("config.json 缺少 finmind.api_token，請先設定。")
                 return
 
             branch_ids = None
@@ -125,7 +154,7 @@ def show_data_management():
             progress = st.empty()
             with st.spinner("分點基本資料下載中..."):
                 trader_df = refresh_trader_info(
-                    token=token.strip(),
+                    token=finmind_token,
                     sqlite_path=Path(sqlite_path) if sqlite_path.strip() else None,
                     raw_dir=Path(raw_dir),
                     branch_ids=branch_ids,
@@ -159,12 +188,7 @@ def show_data_management():
 
         col1, col2 = st.columns(2)
         with col1:
-            token = st.text_input("FinMind Token", type="password")
-            branch_ids_raw = st.text_area(
-                "分點代碼 (逗號分隔)",
-                value="1102,1160",
-                help="例如: 1102,1160,7000",
-            )
+            st.caption("FinMind Token 由 config.json 的 finmind.api_token 自動帶入")
             raw_dir = st.text_input("Raw 資料目錄", value="data/branch_raw")
         with col2:
             end_d = st.date_input("結束日期", value=default_end)
@@ -199,13 +223,18 @@ def show_data_management():
                 key="branch_detail_retry_sleep",
             )
 
+        branch_ids = _load_branch_ids_from_db(sqlite_path)
+        if branch_ids:
+            st.info(f"將使用資料庫中的全部分點，共 {len(branch_ids)} 個。")
+        else:
+            st.warning("目前資料庫查無分點代碼，請先下載分點基本資料。")
+
         if st.button("🚀 啟動分點明細同步", use_container_width=True):
-            branch_ids = [x.strip() for x in branch_ids_raw.split(",") if x.strip()]
-            if not token.strip():
-                st.error("請先輸入 FinMind Token。")
+            if not finmind_token:
+                st.error("config.json 缺少 finmind.api_token，請先設定。")
                 return
             if not branch_ids:
-                st.error("請至少輸入一個分點代碼。")
+                st.error("資料庫查無分點代碼，請先下載分點基本資料。")
                 return
             if start_d > end_d:
                 st.error("開始日期不可晚於結束日期。")
@@ -214,7 +243,7 @@ def show_data_management():
             progress = st.empty()
             with st.spinner("分點明細同步中..."):
                 stats = run_collection(
-                    token=token.strip(),
+                    token=finmind_token,
                     branch_ids=branch_ids,
                     start_date=start_d.isoformat(),
                     end_date=end_d.isoformat(),
