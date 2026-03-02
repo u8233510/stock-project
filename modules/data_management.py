@@ -184,6 +184,7 @@ def show_data_management():
         default_max_retries = int(branch_sync_cfg.get("max_retries", 2) or 2)
         default_retry_sleep = float(branch_sync_cfg.get("retry_sleep_seconds", 1.0) or 1.0)
         default_commit_interval = int(branch_sync_cfg.get("commit_interval", 100) or 100)
+        default_write_raw_csv = bool(branch_sync_cfg.get("write_raw_csv", False))
         retry_notrade_days = int(branch_sync_cfg.get("retry_notrade_days", (cfg.get("ingest") or {}).get("retry_notrade_days", 14)))
         default_refresh_info = bool(branch_sync_cfg.get("refresh_trader_info", False))
         default_recent_mode = bool(branch_sync_cfg.get("recent_only_mode", True))
@@ -247,6 +248,11 @@ def show_data_management():
                 step=10,
                 help="每累積 N 筆再 commit，一般可大幅減少 SQLite I/O 時間。",
             )
+            write_raw_csv = st.checkbox(
+                "同步時輸出 raw csv（較慢）",
+                value=default_write_raw_csv,
+                help="預設關閉。若僅需同步進 SQLite，建議關閉以減少磁碟 I/O 並加速。",
+            )
 
         branch_ids = _load_branch_ids_from_db(sqlite_path)
         if branch_ids:
@@ -290,6 +296,7 @@ def show_data_management():
                     max_retries=int(max_retries),
                     retry_sleep_sec=float(retry_sleep_sec),
                     commit_interval=int(commit_interval),
+                    write_raw_csv=write_raw_csv,
                     progress_callback=lambda msg: progress.info(msg),
                 )
 
