@@ -627,12 +627,18 @@ python utility/finmind_branch_collector.py \
   "start_date": "2026-02-23",
   "end_date": null,
   "sleep_seconds": 0.2,
+  "commit_interval": 100,
   "retry_notrade_days": 14,
+  "recent_only_mode": true,
+  "recent_lookback_days": 3,
   "refresh_trader_info": false
 }
 ```
 
 - `start_date/end_date`：分點同步預設日期區間（`end_date=null` 代表預設今天）。
 - `sleep_seconds`：每次 API 呼叫的等待秒數。
+- `commit_interval`：分點明細寫入 SQLite 時每 N 筆才 commit，降低 I/O 開銷。
 - `retry_notrade_days`：`NoTrade` 幾天內仍保留重試（規則與日線/分鐘同步一致）。
+- `recent_only_mode`：是否預設啟用「快速增量模式」，只同步今天與最近幾天。
+- `recent_lookback_days`：快速增量模式要回補的天數（例如 3 代表今天 + 前 3 天）。
 - `refresh_trader_info`：若設為 `true`，每次執行可先清空 `securities_trader_info` 再重建。

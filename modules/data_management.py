@@ -183,8 +183,11 @@ def show_data_management():
         default_sleep = float(branch_sync_cfg.get("sleep_seconds", 0.2) or 0.2)
         default_max_retries = int(branch_sync_cfg.get("max_retries", 2) or 2)
         default_retry_sleep = float(branch_sync_cfg.get("retry_sleep_seconds", 1.0) or 1.0)
+        default_commit_interval = int(branch_sync_cfg.get("commit_interval", 100) or 100)
         retry_notrade_days = int(branch_sync_cfg.get("retry_notrade_days", (cfg.get("ingest") or {}).get("retry_notrade_days", 14)))
         default_refresh_info = bool(branch_sync_cfg.get("refresh_trader_info", False))
+        default_recent_mode = bool(branch_sync_cfg.get("recent_only_mode", True))
+        default_lookback_days = int(branch_sync_cfg.get("recent_lookback_days", 3) or 3)
 
         col1, col2 = st.columns(2)
         with col1:
@@ -206,6 +209,20 @@ def show_data_management():
                 value=default_refresh_info,
                 help="勾選後會先清空 securities_trader_info，再重新抓取分點基本資料。",
             )
+            recent_only_mode = st.checkbox(
+                "快速增量模式（僅同步今天 + 最近回補天數）",
+                value=default_recent_mode,
+                help="開啟後會忽略上方開始/結束日期，改為自動同步 [今天-回補天數, 今天]，避免每次都從很早日期全量掃描。",
+            )
+            lookback_days = st.number_input(
+                "快速增量模式回補天數",
+                min_value=0,
+                max_value=30,
+                value=max(0, min(30, default_lookback_days)),
+                step=1,
+                disabled=not recent_only_mode,
+                help="例如填 3 代表同步今天與前 3 天（共 4 天）。",
+            )
             max_retries = st.number_input(
                 "API 失敗重試次數",
                 min_value=0,
@@ -221,6 +238,14 @@ def show_data_management():
                 value=max(0.0, min(30.0, default_retry_sleep)),
                 step=0.5,
                 key="branch_detail_retry_sleep",
+            )
+            commit_interval = st.number_input(
+                "資料庫批次提交筆數",
+                min_value=1,
+                max_value=1000,
+                value=max(1, min(1000, default_commit_interval)),
+                step=10,
+                help="每累積 N 筆再 commit，一般可大幅減少 SQLite I/O 時間。",
             )
 
         branch_ids = _load_branch_ids_from_db(sqlite_path)
@@ -240,13 +265,23 @@ def show_data_management():
                 st.error("開始日期不可晚於結束日期。")
                 return
 
+            if recent_only_mode:
+                effective_end_d = date.today()
+                effective_start_d = effective_end_d - timedelta(days=int(lookback_days))
+                st.info(
+                    f"已啟用快速增量模式：同步區間 {effective_start_d.isoformat()} ~ {effective_end_d.isoformat()}"
+                )
+            else:
+                effective_start_d = start_d
+                effective_end_d = end_d
+
             progress = st.empty()
             with st.spinner("分點明細同步中..."):
                 stats = run_collection(
                     token=finmind_token,
                     branch_ids=branch_ids,
-                    start_date=start_d.isoformat(),
-                    end_date=end_d.isoformat(),
+                    start_date=effective_start_d.isoformat(),
+                    end_date=effective_end_d.isoformat(),
                     raw_dir=Path(raw_dir),
                     sqlite_path=Path(sqlite_path) if sqlite_path.strip() else None,
                     sleep_sec=float(sleep_sec),
@@ -254,6 +289,7 @@ def show_data_management():
                     refresh_trader_info=refresh_trader_info_flag,
                     max_retries=int(max_retries),
                     retry_sleep_sec=float(retry_sleep_sec),
+                    commit_interval=int(commit_interval),
                     progress_callback=lambda msg: progress.info(msg),
                 )
 
