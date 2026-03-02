@@ -619,3 +619,20 @@ python utility/finmind_branch_collector.py \
 - `🏦 FinMind 分點明細同步 (分點+日期)`
 
 填入 Token、分點代碼、日期區間即可同步，同步結果會顯示在頁面表格中。
+
+建議在 `config.json` 加上：
+
+```json
+"branch_sync": {
+  "start_date": "2026-02-23",
+  "end_date": null,
+  "sleep_seconds": 0.2,
+  "retry_notrade_days": 14,
+  "refresh_trader_info": false
+}
+```
+
+- `start_date/end_date`：分點同步預設日期區間（`end_date=null` 代表預設今天）。
+- `sleep_seconds`：每次 API 呼叫的等待秒數。
+- `retry_notrade_days`：`NoTrade` 幾天內仍保留重試（規則與日線/分鐘同步一致）。
+- `refresh_trader_info`：若設為 `true`，每次執行可先清空 `securities_trader_info` 再重建。
