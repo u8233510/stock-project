@@ -27,6 +27,26 @@ TABLE_REGISTRY = {
             price REAL, buy INTEGER, sell INTEGER,
             PRIMARY KEY (date, stock_id, securities_trader_id, price)
         );""",
+    "finmind_branch_trade_detail": """
+        CREATE TABLE IF NOT EXISTS finmind_branch_trade_detail (
+            date TEXT NOT NULL,
+            securities_trader_id TEXT NOT NULL,
+            securities_trader TEXT,
+            stock_id TEXT NOT NULL,
+            price REAL NOT NULL,
+            buy INTEGER NOT NULL,
+            sell INTEGER NOT NULL,
+            PRIMARY KEY (date, securities_trader_id, stock_id, price)
+        );""",
+    "finmind_securities_trader_info": """
+        CREATE TABLE IF NOT EXISTS finmind_securities_trader_info (
+            date TEXT NOT NULL,
+            securities_trader_id TEXT NOT NULL,
+            securities_trader TEXT,
+            address TEXT,
+            phone TEXT,
+            PRIMARY KEY (date, securities_trader_id)
+        );""",
     "per_pbr": """
         CREATE TABLE IF NOT EXISTS stock_per_pbr_daily (
             date TEXT NOT NULL, stock_id TEXT NOT NULL,
@@ -149,6 +169,17 @@ TABLE_REGISTRY = {
             status TEXT,
             updated_at TEXT,
             PRIMARY KEY (date, stock_id, api_name)
+        );""",
+    "branch_sync_log": """
+        CREATE TABLE IF NOT EXISTS branch_sync_log (
+            date TEXT NOT NULL,
+            securities_trader_id TEXT NOT NULL,
+            api_name TEXT NOT NULL DEFAULT 'taiwan_stock_trading_daily_report',
+            row_count INTEGER DEFAULT 0,
+            status TEXT,
+            message TEXT,
+            updated_at TEXT,
+            PRIMARY KEY (date, securities_trader_id, api_name)
         );"""
 }
 
@@ -160,7 +191,17 @@ INDEX_REGISTRY = {
     "financial_statements": ["CREATE INDEX IF NOT EXISTS idx_fs_stock_date ON stock_financial_statements(stock_id, date);"],
     "ohlcv_minute": ["CREATE INDEX IF NOT EXISTS idx_min_stock_date ON stock_ohlcv_minute(stock_id, date_time);"],
     "active_flow_daily": ["CREATE INDEX IF NOT EXISTS idx_flow_stock_date ON stock_active_flow_daily(stock_id, date);"],
-    "branch_weighted_cost": ["CREATE INDEX IF NOT EXISTS idx_cost_lookup ON branch_weighted_cost(stock_id);"]
+    "branch_weighted_cost": ["CREATE INDEX IF NOT EXISTS idx_cost_lookup ON branch_weighted_cost(stock_id);"],
+    "finmind_branch_trade_detail": [
+        "CREATE INDEX IF NOT EXISTS idx_finmind_branch_detail_branch_date ON finmind_branch_trade_detail(securities_trader_id, date);",
+        "CREATE INDEX IF NOT EXISTS idx_finmind_branch_detail_stock_date ON finmind_branch_trade_detail(stock_id, date);"
+    ],
+    "finmind_securities_trader_info": [
+        "CREATE INDEX IF NOT EXISTS idx_finmind_trader_info_branch ON finmind_securities_trader_info(securities_trader_id);"
+    ],
+    "branch_sync_log": [
+        "CREATE INDEX IF NOT EXISTS idx_branch_sync_status_date ON branch_sync_log(status, date);"
+    ],
 }
 
 # -----------------------------
@@ -237,6 +278,31 @@ def ensure_data_ingest_log_schema(conn):
         """
     )
     conn.execute("DROP TABLE data_ingest_log_old")
+    conn.commit()
+
+
+
+
+def ensure_finmind_branch_trade_detail_schema(conn):
+    """確保 finmind_branch_trade_detail 表存在（完全對齊 FinMind API schema）。"""
+    conn.execute(TABLE_REGISTRY["finmind_branch_trade_detail"])
+    for idx in INDEX_REGISTRY.get("finmind_branch_trade_detail", []):
+        conn.execute(idx)
+    conn.commit()
+
+
+def ensure_finmind_securities_trader_info_schema(conn):
+    """確保 finmind_securities_trader_info 表存在（分點主檔）。"""
+    conn.execute(TABLE_REGISTRY["finmind_securities_trader_info"])
+    for idx in INDEX_REGISTRY.get("finmind_securities_trader_info", []):
+        conn.execute(idx)
+    conn.commit()
+
+def ensure_branch_sync_log_schema(conn):
+    """確保 branch_sync_log 表存在（供分點明細同步任務使用）。"""
+    conn.execute(TABLE_REGISTRY["branch_sync_log"])
+    for idx in INDEX_REGISTRY.get("branch_sync_log", []):
+        conn.execute(idx)
     conn.commit()
 
 # -----------------------------
