@@ -8,6 +8,15 @@ import ingest_minute
 from utility.finmind_branch_collector import run_collection
 
 
+def _parse_iso_date(value: str | None, fallback: date) -> date:
+    if not value:
+        return fallback
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError:
+        return fallback
+
+
 def show_data_management():
     st.header("⚙️ 資料同步管理中心")
     cfg = database.load_config()
@@ -51,6 +60,14 @@ def show_data_management():
         st.subheader("📋 案件：依分點代碼 + 日期下載交易明細")
 
         default_db = (cfg.get("storage") or {}).get("sqlite_path", "data/stock.db")
+        branch_sync_cfg = cfg.get("branch_sync") or {}
+        default_end = _parse_iso_date(branch_sync_cfg.get("end_date"), date.today())
+        default_start = _parse_iso_date(
+            branch_sync_cfg.get("start_date"),
+            default_end - timedelta(days=7),
+        )
+        default_sleep = float(branch_sync_cfg.get("sleep_seconds", 0.2) or 0.2)
+
         col1, col2 = st.columns(2)
         with col1:
             token = st.text_input("FinMind Token", type="password")
@@ -61,10 +78,16 @@ def show_data_management():
             )
             raw_dir = st.text_input("Raw 資料目錄", value="data/branch_raw")
         with col2:
-            end_d = st.date_input("結束日期", value=date.today())
-            start_d = st.date_input("開始日期", value=end_d - timedelta(days=7))
+            end_d = st.date_input("結束日期", value=default_end)
+            start_d = st.date_input("開始日期", value=default_start)
             sqlite_path = st.text_input("SQLite 路徑", value=default_db)
-            sleep_sec = st.number_input("每次呼叫間隔(秒)", min_value=0.0, max_value=5.0, value=0.2, step=0.1)
+            sleep_sec = st.number_input(
+                "每次呼叫間隔(秒)",
+                min_value=0.0,
+                max_value=5.0,
+                value=max(0.0, min(5.0, default_sleep)),
+                step=0.1,
+            )
 
         if st.button("🚀 啟動分點明細同步", use_container_width=True):
             branch_ids = [x.strip() for x in branch_ids_raw.split(",") if x.strip()]
