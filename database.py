@@ -27,6 +27,26 @@ TABLE_REGISTRY = {
             price REAL, buy INTEGER, sell INTEGER,
             PRIMARY KEY (date, stock_id, securities_trader_id, price)
         );""",
+    "branch_trader_daily_detail": """
+        CREATE TABLE IF NOT EXISTS branch_trader_daily_detail (
+            date TEXT NOT NULL,
+            securities_trader_id TEXT NOT NULL,
+            stock_id TEXT NOT NULL,
+            securities_trader TEXT,
+            price REAL,
+            buy INTEGER,
+            sell INTEGER,
+            PRIMARY KEY (date, securities_trader_id, stock_id, price)
+        );""",
+    "securities_trader_info": """
+        CREATE TABLE IF NOT EXISTS securities_trader_info (
+            securities_trader_id TEXT NOT NULL,
+            securities_trader TEXT,
+            date TEXT,
+            address TEXT,
+            phone TEXT,
+            PRIMARY KEY (securities_trader_id)
+        );""",
     "per_pbr": """
         CREATE TABLE IF NOT EXISTS stock_per_pbr_daily (
             date TEXT NOT NULL, stock_id TEXT NOT NULL,
@@ -174,6 +194,13 @@ INDEX_REGISTRY = {
     "branch_weighted_cost": ["CREATE INDEX IF NOT EXISTS idx_cost_lookup ON branch_weighted_cost(stock_id);"],
     "branch_sync_log": [
         "CREATE INDEX IF NOT EXISTS idx_branch_sync_status_date ON branch_sync_log(status, date);"
+    ],
+    "branch_trader_daily_detail": [
+        "CREATE INDEX IF NOT EXISTS idx_branch_trader_date ON branch_trader_daily_detail(securities_trader_id, date);",
+        "CREATE INDEX IF NOT EXISTS idx_branch_trader_stock_date ON branch_trader_daily_detail(stock_id, date);"
+    ],
+    "securities_trader_info": [
+        "CREATE INDEX IF NOT EXISTS idx_trader_info_name ON securities_trader_info(securities_trader);"
     ],
 }
 
