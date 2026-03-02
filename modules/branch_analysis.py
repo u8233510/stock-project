@@ -121,13 +121,27 @@ def _build_lightgbm_feature_frame(conn, sid, max_trade_days=320, top_n=15):
     return pd.DataFrame(records)
 
 
-def _run_lightgbm_branch_forecast(conn, sid, current_price, main_force_cost, chip_concentration):
+def _resolve_lightgbm_max_trade_days(conn, sid, start_d, end_d, default_max_trade_days):
+    default_days = max(int(default_max_trade_days or 320), 60)
+    selected_days = conn.execute(
+        """
+        SELECT COUNT(DISTINCT date)
+        FROM branch_price_daily
+        WHERE stock_id = ? AND date >= ? AND date <= ?
+        """,
+        (sid, start_d.isoformat(), end_d.isoformat()),
+    ).fetchone()
+    selected_trade_days = int((selected_days or [0])[0] or 0)
+    return max(default_days, selected_trade_days)
+
+
+def _run_lightgbm_branch_forecast(conn, sid, current_price, main_force_cost, chip_concentration, max_trade_days):
     if importlib.util.find_spec("lightgbm") is None:
         return {"status": "missing_dependency", "message": "尚未安裝 lightgbm，請先 `pip install lightgbm`。"}
 
     from lightgbm import LGBMRegressor
 
-    features = _build_lightgbm_feature_frame(conn, sid, max_trade_days=320, top_n=15)
+    features = _build_lightgbm_feature_frame(conn, sid, max_trade_days=max_trade_days, top_n=15)
     prices = pd.read_sql(
         """
         SELECT date, close
@@ -203,6 +217,7 @@ def _run_lightgbm_branch_forecast(conn, sid, current_price, main_force_cost, chi
 
     return {
         "status": "ok",
+        "max_trade_days": int(max_trade_days),
         "samples": int(len(model_ds)),
         "train_samples": int(len(train_df)),
         "test_samples": int(len(test_df)),
@@ -318,11 +333,27 @@ def show_branch_analysis():
             st.metric("買方籌碼集中度", f"{chip_concentration:.2f}%")
             st.caption("定義：前 N 大買超分點淨買超總和 / 全市場總買量。負值代表賣壓強於買盤。")
 
-        lgbm_result = _run_lightgbm_branch_forecast(conn, sid, current_price, main_force_cost, chip_concentration)
+        default_max_trade_days = cfg.get("branch_analysis", {}).get("lightgbm_default_max_trade_days", 320)
+        lightgbm_max_trade_days = _resolve_lightgbm_max_trade_days(
+            conn,
+            sid,
+            start_d,
+            end_d,
+            default_max_trade_days,
+        )
+        lgbm_result = _run_lightgbm_branch_forecast(
+            conn,
+            sid,
+            current_price,
+            main_force_cost,
+            chip_concentration,
+            max_trade_days=lightgbm_max_trade_days,
+        )
         with st.expander("📈 LightGBM 分點訊號（未來 5 日）", expanded=True):
             if lgbm_result["status"] == "ok":
                 st.metric("預估 5 日報酬", f"{lgbm_result['pred_return_5d']:.2f}%")
                 st.caption(
+                    f"建模交易日數 {lgbm_result['max_trade_days']}，"
                     f"樣本數 {lgbm_result['samples']}（訓練 {lgbm_result['train_samples']} / 測試 {lgbm_result['test_samples']}），"
                     f"測試 MAE：{lgbm_result['mae']}"
                 )
