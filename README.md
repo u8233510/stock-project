@@ -590,13 +590,13 @@ python utility/finmind_branch_collector.py \
   --branch-ids "1102,1160,7000" \
   --start-date "2024-01-01" \
   --end-date "2024-01-31" \
-  --raw-dir "data/branch_raw" \
   --sqlite-path "data/stock.db" \
   --sleep-sec 0.2
 ```
 
 說明：
-- `raw-dir` 會存每個「分點-日期」的 csv 與 `fetch_log.csv`。
+- 預設只寫入 SQLite 與 `branch_sync_log`（較快，不輸出 raw csv）。
+- 若要保留每個「分點-日期」csv 與 `fetch_log.csv`，加上：`--write-raw-csv --raw-dir "data/branch_raw"`。
 - `sqlite-path` 若提供，會自動 upsert 至 `branch_price_daily`。
 - 建議每天排程抓「今天 + 最近 3~7 天回補」，不要每天全量重抓。
 
@@ -628,6 +628,7 @@ python utility/finmind_branch_collector.py \
   "end_date": null,
   "sleep_seconds": 0.2,
   "commit_interval": 100,
+  "write_raw_csv": false,
   "retry_notrade_days": 14,
   "recent_only_mode": true,
   "recent_lookback_days": 3,
@@ -638,6 +639,7 @@ python utility/finmind_branch_collector.py \
 - `start_date/end_date`：分點同步預設日期區間（`end_date=null` 代表預設今天）。
 - `sleep_seconds`：每次 API 呼叫的等待秒數。
 - `commit_interval`：分點明細寫入 SQLite 時每 N 筆才 commit，降低 I/O 開銷。
+- `write_raw_csv`：是否輸出每筆 raw csv 到 `raw-dir`（預設 `false`，建議維持關閉以提升同步速度）。
 - `retry_notrade_days`：`NoTrade` 幾天內仍保留重試（規則與日線/分鐘同步一致）。
 - `recent_only_mode`：是否預設啟用「快速增量模式」，只同步今天與最近幾天。
 - `recent_lookback_days`：快速增量模式要回補的天數（例如 3 代表今天 + 前 3 天）。

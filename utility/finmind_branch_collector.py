@@ -338,6 +338,7 @@ def run_collection(
     max_retries: int = 2,
     retry_sleep_sec: float = 1.0,
     commit_interval: int = 100,
+    write_raw_csv: bool = False,
     progress_callback: Callable[[str], None] | None = None,
 ) -> pd.DataFrame:
     api = DataLoader()
@@ -347,7 +348,8 @@ def run_collection(
     if conn is not None:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
-    raw_dir.mkdir(parents=True, exist_ok=True)
+    if write_raw_csv:
+        raw_dir.mkdir(parents=True, exist_ok=True)
 
     stats: list[FetchStats] = []
     total_jobs = len(branch_ids) * sum(1 for _ in daterange(start_date, end_date))
@@ -473,8 +475,9 @@ def run_collection(
                     )
                     clean_df = normalize_branch_df(raw_df, branch_id=branch_id, trade_date=trade_date)
 
-                    raw_file = raw_dir / f"{trade_date}_{branch_id}.csv"
-                    clean_df.to_csv(raw_file, index=False, encoding="utf-8-sig")
+                    if write_raw_csv:
+                        raw_file = raw_dir / f"{trade_date}_{branch_id}.csv"
+                        clean_df.to_csv(raw_file, index=False, encoding="utf-8-sig")
 
                     if clean_df.empty:
                         stat = FetchStats(branch_id, trade_date, 0, "NoTrade")
@@ -500,11 +503,14 @@ def run_collection(
             conn.close()
 
     stat_df = pd.DataFrame([s.__dict__ for s in stats])
-    stat_df.to_csv(raw_dir / "fetch_log.csv", index=False, encoding="utf-8-sig")
+    if write_raw_csv:
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        stat_df.to_csv(raw_dir / "fetch_log.csv", index=False, encoding="utf-8-sig")
 
     ok = int((stat_df["status"] == "Success").sum()) if not stat_df.empty else 0
     err = int((stat_df["status"] == "Failed").sum()) if not stat_df.empty else 0
-    print(f"Done. success={ok}, error={err}, log={raw_dir / 'fetch_log.csv'}")
+    log_msg = str(raw_dir / "fetch_log.csv") if write_raw_csv else "(skip raw csv logging)"
+    print(f"Done. success={ok}, error={err}, log={log_msg}")
     return stat_df
 
 
@@ -539,6 +545,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-retries", type=int, default=2, help="API 失敗重試次數")
     parser.add_argument("--retry-sleep-sec", type=float, default=1.0, help="API 重試等待秒數")
     parser.add_argument("--commit-interval", type=int, default=100, help="每 N 筆寫入才 commit 一次")
+    parser.add_argument(
+        "--write-raw-csv",
+        action="store_true",
+        help="將每筆分點-日期結果與 fetch_log 輸出到 raw-dir（預設關閉以提升同步速度）",
+    )
     return parser.parse_args()
 
 
@@ -559,6 +570,7 @@ def main():
         max_retries=args.max_retries,
         retry_sleep_sec=args.retry_sleep_sec,
         commit_interval=args.commit_interval,
+        write_raw_csv=args.write_raw_csv,
     )
 
 
