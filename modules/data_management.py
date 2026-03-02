@@ -1,6 +1,6 @@
 import streamlit as st
 from pathlib import Path
-from datetime import date, timedelta
+from datetime import date
 
 import database
 import ingest_manager
@@ -51,6 +51,14 @@ def show_data_management():
         st.subheader("📋 案件：依分點代碼 + 日期下載交易明細")
 
         default_db = (cfg.get("storage") or {}).get("sqlite_path", "data/stock.db")
+        branch_sync_cfg = cfg.get("branch_sync", {})
+        ingest_master_cfg = cfg.get("ingest_master", {})
+        ingest_cfg = cfg.get("ingest", {})
+
+        default_end = branch_sync_cfg.get("end_date") or date.today().isoformat()
+        default_start = branch_sync_cfg.get("start_date") or ingest_master_cfg.get("start_date") or default_end
+        default_sleep = float(branch_sync_cfg.get("sleep_seconds", ingest_cfg.get("sleep_seconds", 0.3)))
+
         col1, col2 = st.columns(2)
         with col1:
             token = st.text_input("FinMind Token", type="password")
@@ -61,10 +69,16 @@ def show_data_management():
             )
             raw_dir = st.text_input("Raw 資料目錄", value="data/branch_raw")
         with col2:
-            end_d = st.date_input("結束日期", value=date.today())
-            start_d = st.date_input("開始日期", value=end_d - timedelta(days=7))
+            end_d = st.date_input("結束日期", value=date.fromisoformat(default_end))
+            start_d = st.date_input("開始日期", value=date.fromisoformat(default_start))
             sqlite_path = st.text_input("SQLite 路徑", value=default_db)
-            sleep_sec = st.number_input("每次呼叫間隔(秒)", min_value=0.0, max_value=5.0, value=0.2, step=0.1)
+            sleep_sec = st.number_input(
+                "每次呼叫間隔(秒)",
+                min_value=0.0,
+                max_value=5.0,
+                value=max(0.0, min(5.0, default_sleep)),
+                step=0.1,
+            )
 
         if st.button("🚀 啟動分點明細同步", use_container_width=True):
             branch_ids = [x.strip() for x in branch_ids_raw.split(",") if x.strip()]
