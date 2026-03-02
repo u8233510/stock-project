@@ -42,6 +42,9 @@
       "embedding_model": "nvidia/nv-embed-v1",
       "top_k": 5
     }
+  },
+  "branch_analysis": {
+    "lightgbm_default_max_trade_days": 320
   }
 }
 ```
@@ -576,4 +579,3 @@ mine_q2 = ai.mine_trading_strategies(start_date="2024-04-01", end_date="2024-06-
 
 - `股票代號` 或 `stock_id`（若沒有，會自動標記 `UNKNOWN`）
 - `收盤價`（若沒有，會以 `成交均價` 代替）
-
