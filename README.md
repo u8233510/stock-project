@@ -579,3 +579,43 @@ mine_q2 = ai.mine_trading_strategies(start_date="2024-04-01", end_date="2024-06-
 
 - `股票代號` 或 `stock_id`（若沒有，會自動標記 `UNKNOWN`）
 - `收盤價`（若沒有，會以 `成交均價` 代替）
+
+## FinMind 分點資料批次下載（分點 + 日期）
+
+當 API 是 `securities_trader_id + date` 粒度時，可用以下腳本批次抓取並寫入 `branch_price_daily`：
+
+```bash
+python utility/finmind_branch_collector.py \
+  --token "YOUR_FINMIND_TOKEN" \
+  --branch-ids "1102,1160,7000" \
+  --start-date "2024-01-01" \
+  --end-date "2024-01-31" \
+  --raw-dir "data/branch_raw" \
+  --sqlite-path "data/stock.db" \
+  --sleep-sec 0.2
+```
+
+說明：
+- `raw-dir` 會存每個「分點-日期」的 csv 與 `fetch_log.csv`。
+- `sqlite-path` 若提供，會自動 upsert 至 `branch_price_daily`。
+- 建議每天排程抓「今天 + 最近 3~7 天回補」，不要每天全量重抓。
+
+### `branch_sync_log` 同步紀錄表
+
+分點明細同步現在會建立 `branch_sync_log`（若不存在）並寫入每次 API 呼叫狀態：
+- `date`
+- `securities_trader_id`
+- `api_name`
+- `row_count`
+- `status`
+- `message`
+- `updated_at`
+
+可用於查詢哪個分點、哪一天下載失敗，方便重跑。
+
+### Streamlit 介面同步（app.py）
+
+到「⚙️ 資料同步管理」頁籤，選：
+- `🏦 FinMind 分點明細同步 (分點+日期)`
+
+填入 Token、分點代碼、日期區間即可同步，同步結果會顯示在頁面表格中。
