@@ -5,7 +5,7 @@ from datetime import date, timedelta
 import database
 import ingest_manager
 import ingest_minute
-from utility.finmind_branch_collector import run_collection
+from utility.finmind_branch_collector import run_collection, refresh_trader_info
 
 
 def _parse_iso_date(value: str | None, fallback: date) -> date:
@@ -26,6 +26,7 @@ def show_data_management():
         [
             "📅 每日 13 項指標 (原 Ingest Manager)",
             "⏱️ 分鐘與主動力度 (新 Ingest Minute)",
+            "🏦 FinMind 分點基本資料下載",
             "🏦 FinMind 分點明細同步 (分點+日期)",
         ],
         horizontal=True,
@@ -56,6 +57,90 @@ def show_data_management():
         if st.button("🚀 啟動分鐘級數據補洞 (含 A/B 對帳)", use_container_width=True):
             ingest_minute.run_minute_task(cfg)
 
+    elif task_type == "🏦 FinMind 分點基本資料下載":
+        st.subheader("📋 案件：手動下載分點基本資料")
+
+        default_db = (cfg.get("storage") or {}).get("sqlite_path", "data/stock.db")
+        branch_sync_cfg = cfg.get("branch_sync") or {}
+        default_sleep = float(branch_sync_cfg.get("sleep_seconds", 0.2) or 0.2)
+        default_max_retries = int(branch_sync_cfg.get("max_retries", 2) or 2)
+        default_retry_sleep = float(branch_sync_cfg.get("retry_sleep_seconds", 1.0) or 1.0)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            token = st.text_input("FinMind Token", type="password", key="trader_info_token")
+            download_mode = st.radio(
+                "下載模式",
+                ["全部分點", "指定分點"],
+                horizontal=True,
+                key="trader_info_mode",
+            )
+            branch_ids_raw = st.text_area(
+                "指定分點代碼 (逗號分隔)",
+                value="1102,1160",
+                disabled=(download_mode != "指定分點"),
+                key="trader_info_branch_ids",
+            )
+            raw_dir = st.text_input("Raw 資料目錄", value="data/branch_raw", key="trader_info_raw_dir")
+
+        with col2:
+            sqlite_path = st.text_input("SQLite 路徑", value=default_db, key="trader_info_sqlite")
+            sleep_sec = st.number_input(
+                "每次呼叫間隔(秒)",
+                min_value=0.0,
+                max_value=5.0,
+                value=max(0.0, min(5.0, default_sleep)),
+                step=0.1,
+                key="trader_info_sleep",
+            )
+            max_retries = st.number_input(
+                "API 失敗重試次數",
+                min_value=0,
+                max_value=10,
+                value=max(0, min(10, default_max_retries)),
+                step=1,
+                key="trader_info_retries",
+            )
+            retry_sleep_sec = st.number_input(
+                "API 重試等待(秒)",
+                min_value=0.0,
+                max_value=30.0,
+                value=max(0.0, min(30.0, default_retry_sleep)),
+                step=0.5,
+                key="trader_info_retry_sleep",
+            )
+
+        if st.button("🚀 啟動分點基本資料下載", use_container_width=True):
+            if not token.strip():
+                st.error("請先輸入 FinMind Token。")
+                return
+
+            branch_ids = None
+            if download_mode == "指定分點":
+                branch_ids = [x.strip() for x in branch_ids_raw.split(",") if x.strip()]
+                if not branch_ids:
+                    st.error("指定分點模式下，請至少輸入一個分點代碼。")
+                    return
+
+            progress = st.empty()
+            with st.spinner("分點基本資料下載中..."):
+                trader_df = refresh_trader_info(
+                    token=token.strip(),
+                    sqlite_path=Path(sqlite_path) if sqlite_path.strip() else None,
+                    raw_dir=Path(raw_dir),
+                    branch_ids=branch_ids,
+                    sleep_sec=float(sleep_sec),
+                    max_retries=int(max_retries),
+                    retry_sleep_sec=float(retry_sleep_sec),
+                    progress_callback=lambda msg: progress.info(msg),
+                )
+
+            if trader_df is None or trader_df.empty:
+                st.warning("完成，但 API 回傳 0 筆分點基本資料。")
+            else:
+                st.success(f"完成：已下載/更新 {len(trader_df)} 筆分點基本資料")
+                st.dataframe(trader_df.tail(500), use_container_width=True)
+
     elif task_type == "🏦 FinMind 分點明細同步 (分點+日期)":
         st.subheader("📋 案件：依分點代碼 + 日期下載交易明細")
 
@@ -67,6 +152,8 @@ def show_data_management():
             default_end - timedelta(days=7),
         )
         default_sleep = float(branch_sync_cfg.get("sleep_seconds", 0.2) or 0.2)
+        default_max_retries = int(branch_sync_cfg.get("max_retries", 2) or 2)
+        default_retry_sleep = float(branch_sync_cfg.get("retry_sleep_seconds", 1.0) or 1.0)
         retry_notrade_days = int(branch_sync_cfg.get("retry_notrade_days", (cfg.get("ingest") or {}).get("retry_notrade_days", 14)))
         default_refresh_info = bool(branch_sync_cfg.get("refresh_trader_info", False))
 
@@ -95,6 +182,22 @@ def show_data_management():
                 value=default_refresh_info,
                 help="勾選後會先清空 securities_trader_info，再重新抓取分點基本資料。",
             )
+            max_retries = st.number_input(
+                "API 失敗重試次數",
+                min_value=0,
+                max_value=10,
+                value=max(0, min(10, default_max_retries)),
+                step=1,
+                key="branch_detail_retries",
+            )
+            retry_sleep_sec = st.number_input(
+                "API 重試等待(秒)",
+                min_value=0.0,
+                max_value=30.0,
+                value=max(0.0, min(30.0, default_retry_sleep)),
+                step=0.5,
+                key="branch_detail_retry_sleep",
+            )
 
         if st.button("🚀 啟動分點明細同步", use_container_width=True):
             branch_ids = [x.strip() for x in branch_ids_raw.split(",") if x.strip()]
@@ -120,6 +223,8 @@ def show_data_management():
                     sleep_sec=float(sleep_sec),
                     retry_notrade_days=retry_notrade_days,
                     refresh_trader_info=refresh_trader_info,
+                    max_retries=int(max_retries),
+                    retry_sleep_sec=float(retry_sleep_sec),
                     progress_callback=lambda msg: progress.info(msg),
                 )
 
