@@ -201,7 +201,7 @@ def show_data_management():
                 value=max(0.0, min(5.0, default_sleep)),
                 step=0.1,
             )
-            refresh_trader_info = st.checkbox(
+            refresh_trader_info_flag = st.checkbox(
                 "執行前清空分點基本資料後重建",
                 value=default_refresh_info,
                 help="勾選後會先清空 securities_trader_info，再重新抓取分點基本資料。",
@@ -251,7 +251,7 @@ def show_data_management():
                     sqlite_path=Path(sqlite_path) if sqlite_path.strip() else None,
                     sleep_sec=float(sleep_sec),
                     retry_notrade_days=retry_notrade_days,
-                    refresh_trader_info=refresh_trader_info,
+                    refresh_trader_info=refresh_trader_info_flag,
                     max_retries=int(max_retries),
                     retry_sleep_sec=float(retry_sleep_sec),
                     progress_callback=lambda msg: progress.info(msg),
