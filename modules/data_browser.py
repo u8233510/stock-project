@@ -72,16 +72,40 @@ def show_data_browser():
             else:
                 st.info("此資料表無可用股票代號可供篩選。")
         elif use_branch_filter:
-            if branch_name_col:
+            # 優先使用 securities_trader_info 當作分點中文名稱來源，
+            # 避免明細表內名稱欄位缺漏或重複顯示代號。
+            info_table_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='securities_trader_info'"
+            ).fetchone()
+
+            branch_options = {}
+            if info_table_exists:
+                info_rows = conn.execute(
+                    """
+                    SELECT DISTINCT d.securities_trader_id, i.securities_trader
+                    FROM branch_trader_daily_detail d
+                    LEFT JOIN securities_trader_info i
+                      ON i.securities_trader_id = d.securities_trader_id
+                    ORDER BY d.securities_trader_id
+                    """
+                ).fetchall()
+                branch_options = {
+                    f"{row[0]} {str(row[1]).strip() if row[1] else ''}".strip(): row[0]
+                    for row in info_rows
+                    if row[0]
+                }
+
+            if not branch_options and branch_name_col:
                 branch_rows = conn.execute(
                     f"SELECT DISTINCT {branch_id_col}, {branch_name_col} FROM {selected_table_en} ORDER BY {branch_id_col}"
                 ).fetchall()
                 branch_options = {
-                    f"{row[0]} {row[1]}".strip(): row[0]
+                    f"{row[0]} {str(row[1]).strip() if row[1] else ''}".strip(): row[0]
                     for row in branch_rows
                     if row[0]
                 }
-            else:
+
+            if not branch_options:
                 branch_rows = conn.execute(f"SELECT DISTINCT {branch_id_col} FROM {selected_table_en} ORDER BY {branch_id_col}").fetchall()
                 branch_options = {row[0]: row[0] for row in branch_rows if row[0]}
 
