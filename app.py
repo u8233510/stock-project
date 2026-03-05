@@ -1,6 +1,6 @@
 import streamlit as st
 # 匯入所有功能模組，包含新加入的 data_management
-from modules import data_browser, tech_analysis, branch_analysis, stock_health, data_management, prediction, fundamental_analysis, branch_anomaly, winner_branch_system
+from modules import data_browser, tech_analysis, branch_analysis, stock_health, data_management, prediction, fundamental_analysis, branch_anomaly, winner_branch_system, branch_accumulation_scan
 ##--- 頁面配置 ---
 st.set_page_config(page_title="台股 AI 自動化分析平台", layout="wide")
 
@@ -13,6 +13,7 @@ main_menu = st.sidebar.radio(
         "📈 技術分析",
         "📈 分點分析",
         "🚨 分點異常偵測",
+        "🕵️ 低檔潛伏分點掃描",
         "🧠 AI 贏家分點追蹤",
         "🏥 全方位籌碼診斷",
         "🔮 股價趨勢預測",
@@ -39,6 +40,9 @@ elif main_menu == "🏥 全方位籌碼診斷":
 
 elif main_menu == "🚨 分點異常偵測":
     branch_anomaly.show_branch_anomaly()
+
+elif main_menu == "🕵️ 低檔潛伏分點掃描":
+    branch_accumulation_scan.show_branch_accumulation_scan()
 
 elif main_menu == "🧠 AI 贏家分點追蹤":
     winner_branch_system.show_winner_branch_system()
