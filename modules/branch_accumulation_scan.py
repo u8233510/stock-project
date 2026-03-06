@@ -22,6 +22,15 @@ COLUMN_LABELS = {
 
 def _load_scan_raw(conn, start_date: str, end_date: str) -> pd.DataFrame:
     sql = """
+    WITH daily_total_volume AS (
+        SELECT
+            stock_id,
+            date,
+            SUM(COALESCE(buy, 0) + COALESCE(sell, 0)) AS trading_volume
+        FROM branch_trader_daily_detail
+        WHERE date BETWEEN ? AND ?
+        GROUP BY stock_id, date
+    )
     SELECT
         b.stock_id,
         b.date,
@@ -29,15 +38,15 @@ def _load_scan_raw(conn, start_date: str, end_date: str) -> pd.DataFrame:
         b.securities_trader AS branch_name,
         b.buy,
         b.sell,
-        o.Trading_Volume
+        d.trading_volume AS Trading_Volume
     FROM branch_trader_daily_detail b
-    JOIN stock_ohlcv_daily o
-      ON o.stock_id = b.stock_id
-     AND o.date = b.date
+    LEFT JOIN daily_total_volume d
+      ON d.stock_id = b.stock_id
+     AND d.date = b.date
     WHERE b.date BETWEEN ? AND ?
     ORDER BY b.stock_id ASC, b.securities_trader_id ASC, b.date ASC
     """
-    return pd.read_sql(sql, conn, params=(start_date, end_date))
+    return pd.read_sql(sql, conn, params=(start_date, end_date, start_date, end_date))
 
 
 def show_branch_accumulation_scan():
