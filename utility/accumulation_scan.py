@@ -22,13 +22,51 @@ def _prepare_scan_frame(raw_df: pd.DataFrame) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
     df["net_buy"] = df["buy"] - df["sell"]
-    sell_nonzero = df["sell"].replace(0, pd.NA)
-    df["buy_sell_ratio"] = (df["buy"] / sell_nonzero).astype("float")
+
+    # NOTE:
+    # pandas nullable dtypes + pd.NA can raise TypeError on `.astype("float")`
+    # in some versions. Keep arithmetic as numeric and coerce invalid values.
+    sell_nonzero = df["sell"].replace(0, float("nan"))
+    df["buy_sell_ratio"] = pd.to_numeric(df["buy"] / sell_nonzero, errors="coerce")
     df["buy_sell_ratio"] = df["buy_sell_ratio"].fillna(float("inf"))
 
-    vol_nonzero = df["Trading_Volume"].replace(0, pd.NA)
-    df["volume_share"] = (df["net_buy"] / vol_nonzero).astype("float").fillna(0.0)
+    vol_nonzero = df["Trading_Volume"].replace(0, float("nan"))
+    df["volume_share"] = pd.to_numeric(df["net_buy"] / vol_nonzero, errors="coerce").fillna(0.0)
     return df
+
+
+def summarize_accumulation_filters(raw_df: pd.DataFrame, cfg: AccumulationScanConfig) -> dict:
+    """Return filter-stage diagnostics so UI can explain why results are empty."""
+    df = _prepare_scan_frame(raw_df)
+    if df.empty:
+        return {
+            "raw_rows": 0,
+            "stock_count": 0,
+            "branch_count": 0,
+            "trade_days": 0,
+            "net_buy_rows": 0,
+            "ratio_rows": 0,
+            "share_rows": 0,
+            "all_rules_rows": 0,
+            "missing_ohlcv_rows": 0,
+        }
+
+    net_buy_mask = df["net_buy"] > 0
+    ratio_mask = df["buy_sell_ratio"] > float(cfg.min_buy_sell_ratio)
+    share_mask = df["volume_share"] >= float(cfg.min_volume_share)
+    all_mask = net_buy_mask & ratio_mask & share_mask
+
+    return {
+        "raw_rows": int(len(df)),
+        "stock_count": int(df["stock_id"].nunique()) if "stock_id" in df.columns else 0,
+        "branch_count": int(df["branch_id"].nunique()) if "branch_id" in df.columns else 0,
+        "trade_days": int(df["date"].nunique()),
+        "net_buy_rows": int(net_buy_mask.sum()),
+        "ratio_rows": int(ratio_mask.sum()),
+        "share_rows": int(share_mask.sum()),
+        "all_rules_rows": int(all_mask.sum()),
+        "missing_ohlcv_rows": int(df.get("missing_ohlcv", pd.Series(dtype=int)).fillna(0).sum()),
+    }
 
 
 def run_accumulation_scan(raw_df: pd.DataFrame, cfg: AccumulationScanConfig) -> pd.DataFrame:
