@@ -168,6 +168,20 @@ def _build_holding_style(events_df: pd.DataFrame) -> pd.DataFrame:
 
 def _load_branch_raw(conn, start_date: str, end_date: str) -> pd.DataFrame:
     sql = """
+    WITH daily_close_proxy AS (
+        SELECT
+            stock_id,
+            date,
+            COALESCE(
+                SUM(price * (COALESCE(buy, 0) + COALESCE(sell, 0)))
+                / NULLIF(SUM(COALESCE(buy, 0) + COALESCE(sell, 0)), 0),
+                AVG(price)
+            ) AS close_proxy
+        FROM branch_trader_daily_detail
+        WHERE date >= ?
+          AND date <= ?
+        GROUP BY stock_id, date
+    )
     SELECT
         b.stock_id,
         b.date,
@@ -176,16 +190,16 @@ def _load_branch_raw(conn, start_date: str, end_date: str) -> pd.DataFrame:
         b.price,
         b.buy,
         b.sell,
-        o.close
+        COALESCE(d.close_proxy, b.price) AS close
     FROM branch_trader_daily_detail b
-    JOIN stock_ohlcv_daily o
-      ON b.stock_id = o.stock_id
-     AND b.date = o.date
+    LEFT JOIN daily_close_proxy d
+      ON b.stock_id = d.stock_id
+     AND b.date = d.date
     WHERE b.date >= ?
       AND b.date <= ?
     ORDER BY b.stock_id ASC, b.date ASC
     """
-    return pd.read_sql(sql, conn, params=(start_date, end_date))
+    return pd.read_sql(sql, conn, params=(start_date, end_date, start_date, end_date))
 
 
 def _build_stock_opportunity_table(events_df: pd.DataFrame) -> pd.DataFrame:
