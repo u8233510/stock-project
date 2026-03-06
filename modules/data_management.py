@@ -7,6 +7,7 @@ import database
 import ingest_manager
 import ingest_minute
 from utility.finmind_branch_collector import run_collection, refresh_trader_info
+from utility.finmind_stock_info_collector import refresh_stock_info
 
 
 def _parse_iso_date(value: str | None, fallback: date) -> date:
@@ -56,6 +57,7 @@ def show_data_management():
             "📅 每日 13 項指標 (原 Ingest Manager)",
             "⏱️ 分鐘與主動力度 (新 Ingest Minute)",
             "🏦 FinMind 分點基本資料下載",
+            "🏦 FinMind 股票資訊同步",
             "🏦 FinMind 分點明細同步 (分點+日期)",
         ],
         horizontal=True,
@@ -169,6 +171,70 @@ def show_data_management():
             else:
                 st.success(f"完成：已下載/更新 {len(trader_df)} 筆分點基本資料")
                 st.dataframe(trader_df.tail(500), use_container_width=True)
+
+    elif task_type == "🏦 FinMind 股票資訊同步":
+        st.subheader("📋 案件：同步股票資訊（含權證）")
+
+        default_db = (cfg.get("storage") or {}).get("sqlite_path", "data/stock.db")
+        branch_sync_cfg = cfg.get("branch_sync") or {}
+        default_sleep = float(branch_sync_cfg.get("sleep_seconds", 0.2) or 0.2)
+        default_max_retries = int(branch_sync_cfg.get("max_retries", 2) or 2)
+        default_retry_sleep = float(branch_sync_cfg.get("retry_sleep_seconds", 1.0) or 1.0)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.caption("FinMind Token 由 config.json 的 finmind.api_token 自動帶入")
+            raw_dir = st.text_input("Raw 資料目錄", value="data/stock_info_raw", key="stock_info_raw_dir")
+
+        with col2:
+            sqlite_path = st.text_input("SQLite 路徑", value=default_db, key="stock_info_sqlite")
+            sleep_sec = st.number_input(
+                "每次呼叫間隔(秒)",
+                min_value=0.0,
+                max_value=5.0,
+                value=max(0.0, min(5.0, default_sleep)),
+                step=0.1,
+                key="stock_info_sleep",
+            )
+            max_retries = st.number_input(
+                "API 失敗重試次數",
+                min_value=0,
+                max_value=10,
+                value=max(0, min(10, default_max_retries)),
+                step=1,
+                key="stock_info_retries",
+            )
+            retry_sleep_sec = st.number_input(
+                "API 重試等待(秒)",
+                min_value=0.0,
+                max_value=30.0,
+                value=max(0.0, min(30.0, default_retry_sleep)),
+                step=0.5,
+                key="stock_info_retry_sleep",
+            )
+
+        if st.button("🚀 啟動股票資訊同步", use_container_width=True):
+            if not finmind_token:
+                st.error("config.json 缺少 finmind.api_token，請先設定。")
+                return
+
+            progress = st.empty()
+            with st.spinner("股票資訊同步中..."):
+                stock_info_df = refresh_stock_info(
+                    token=finmind_token,
+                    sqlite_path=Path(sqlite_path) if sqlite_path.strip() else None,
+                    raw_dir=Path(raw_dir),
+                    sleep_sec=float(sleep_sec),
+                    max_retries=int(max_retries),
+                    retry_sleep_sec=float(retry_sleep_sec),
+                    progress_callback=lambda msg: progress.info(msg),
+                )
+
+            if stock_info_df is None or stock_info_df.empty:
+                st.warning("完成，但 API 回傳 0 筆股票資訊。")
+            else:
+                st.success(f"完成：已下載/更新 {len(stock_info_df)} 筆股票資訊")
+                st.dataframe(stock_info_df.tail(500), use_container_width=True)
 
     elif task_type == "🏦 FinMind 分點明細同步 (分點+日期)":
         st.subheader("📋 案件：依分點代碼 + 日期下載交易明細")
