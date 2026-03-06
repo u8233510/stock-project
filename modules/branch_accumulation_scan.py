@@ -81,13 +81,16 @@ def show_branch_accumulation_scan():
 
     start_d, end_d = date_range
 
-    c3, c4, c5 = st.columns(3)
+    c3, c4, c5, c6 = st.columns(4)
     with c3:
         lookback_days = st.slider("掃描回看天數", min_value=20, max_value=180, value=60, step=5, key="acc_scan_lookback")
     with c4:
         min_stability = st.slider("最低穩定度", min_value=0.3, max_value=0.95, value=0.5, step=0.05, key="acc_scan_stability")
     with c5:
         min_coord = st.slider("最低協同性", min_value=0.1, max_value=1.0, value=0.5, step=0.05, key="acc_scan_coord")
+    with c6:
+        score_threshold = st.slider("最低綜合分數(%)", min_value=0, max_value=100, value=50, step=5, key="acc_scan_score_threshold")
+
 
     run = st.button("執行全市場低檔潛伏掃描", type="primary", use_container_width=True, key="acc_scan_run")
 
@@ -105,6 +108,7 @@ def show_branch_accumulation_scan():
             lookback_days=int(lookback_days),
             min_stability=float(min_stability),
             coord_threshold=float(min_coord),
+            final_score_threshold=int(score_threshold),
         )
         result_df = run_accumulation_scan(raw_df, scan_cfg)
         st.session_state[state_key] = result_df
