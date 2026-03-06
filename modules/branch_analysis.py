@@ -235,8 +235,30 @@ def show_branch_analysis():
     st.markdown("### 🔍 專業級分點籌碼與產業聯動診斷")
     cfg = database.load_config()
     conn = database.get_db_connection(cfg)
+
+    # 以分點明細資料表為主，避免僅分析 config.json universe 內的股票。
+    stock_rows = conn.execute(
+        """
+        SELECT DISTINCT stock_id
+        FROM branch_price_daily
+        WHERE stock_id IS NOT NULL AND stock_id != ''
+        ORDER BY stock_id ASC
+        """
+    ).fetchall()
+    stock_ids = [str(r[0]) for r in stock_rows if r and r[0]]
+
     universe = cfg.get("universe", [])
-    stock_options = {f"{s['stock_id']} {s['name']}": s['stock_id'] for s in universe}
+    name_map = {str(s.get("stock_id")): s.get("name", "") for s in universe if s.get("stock_id")}
+
+    stock_options = {
+        (f"{sid} {name_map[sid]}".strip() if name_map.get(sid) else sid): sid
+        for sid in stock_ids
+    }
+
+    if not stock_options:
+        st.warning("branch_price_daily 尚無可分析的股票資料，請先同步分點明細。")
+        conn.close()
+        return
 
     c1, c2, c3, c4, c5 = st.columns([1.7, 1.5, 1.1, 0.7, 1.2])
     with c1:
