@@ -87,25 +87,52 @@ def show_branch_accumulation_scan():
     with c5:
         min_coord = st.slider("最低協同性", min_value=0.1, max_value=1.0, value=0.5, step=0.05, key="acc_scan_coord")
 
-    run = st.button("執行全市場低檔潛伏掃描", type="primary", use_container_width=True, key="acc_scan_run")
+    running_key = "acc_scan_running"
+    if running_key not in st.session_state:
+        st.session_state[running_key] = False
+
+    run = st.button(
+        "執行全市場低檔潛伏掃描",
+        type="primary",
+        use_container_width=True,
+        key="acc_scan_run",
+        disabled=st.session_state[running_key],
+    )
 
     state_key = "accumulation_scan_result"
-    if run:
-        with st.spinner("掃描中，請稍候..."):
+    if run and not st.session_state[running_key]:
+        st.session_state[running_key] = True
+        st.rerun()
+
+    if st.session_state[running_key]:
+        progress_text = st.empty()
+        progress_bar = st.progress(0)
+
+        try:
+            progress_text.info("掃描進行中：1/3 讀取資料中...")
+            progress_bar.progress(15)
             raw_df = _load_scan_raw(conn, str(start_d), str(end_d))
 
-        if raw_df.empty:
-            st.info("選定區間內無可用資料。")
-            st.session_state.pop(state_key, None)
-            return
+            if raw_df.empty:
+                st.info("選定區間內無可用資料。")
+                st.session_state.pop(state_key, None)
+                return
 
-        scan_cfg = AccumulationScanConfig(
-            lookback_days=int(lookback_days),
-            min_stability=float(min_stability),
-            coord_threshold=float(min_coord),
-        )
-        result_df = run_accumulation_scan(raw_df, scan_cfg)
-        st.session_state[state_key] = result_df
+            progress_text.info("掃描進行中：2/3 計算多因子分數...")
+            progress_bar.progress(60)
+            scan_cfg = AccumulationScanConfig(
+                lookback_days=int(lookback_days),
+                min_stability=float(min_stability),
+                coord_threshold=float(min_coord),
+            )
+            result_df = run_accumulation_scan(raw_df, scan_cfg)
+            st.session_state[state_key] = result_df
+
+            progress_text.info("掃描進行中：3/3 整理結果...")
+            progress_bar.progress(100)
+            progress_text.success("掃描完成。")
+        finally:
+            st.session_state[running_key] = False
 
     if state_key not in st.session_state:
         st.info("請先設定條件後，點擊「執行全市場低檔潛伏掃描」。")
