@@ -7,30 +7,23 @@ from utility.accumulation_scan import AccumulationScanConfig, run_accumulation_s
 
 COLUMN_LABELS = {
     "stock_id": "股票代號",
-    "branch_id": "分點代號",
-    "branch_name": "分點名稱",
-    "start_date": "訊號起始日",
-    "end_date": "訊號結束日",
-    "consecutive_days": "連續買超天數",
-    "net_buy_total": "區間買超張數",
-    "avg_buy_sell_ratio": "平均買賣比",
-    "avg_volume_share": "平均成交佔比",
-    "signal_count": "符合區段數",
-    "latest_signal_end": "最近訊號日",
+    "stability": "買入穩定度",
+    "is_shifting": "結構轉強",
+    "has_anomaly": "異常訊號",
+    "coordination_score": "集團協同性",
 }
 
 
 def _load_scan_raw(conn, start_date: str, end_date: str) -> pd.DataFrame:
-    sql = """
-    WITH daily_total_volume AS (
-        SELECT
-            stock_id,
-            date,
-            SUM(COALESCE(buy, 0) + COALESCE(sell, 0)) AS trading_volume
-        FROM branch_trader_daily_detail
-        WHERE date BETWEEN ? AND ?
-        GROUP BY stock_id, date
-    )
+    table_cols = {row[1] for row in conn.execute("PRAGMA table_info(branch_trader_daily_detail)").fetchall()}
+    if "price" in table_cols:
+        price_expr = "b.price"
+    elif "close" in table_cols:
+        price_expr = "b.close AS price"
+    else:
+        price_expr = "NULL AS price"
+
+    sql = f"""
     SELECT
         b.stock_id,
         b.date,
@@ -38,20 +31,17 @@ def _load_scan_raw(conn, start_date: str, end_date: str) -> pd.DataFrame:
         b.securities_trader AS branch_name,
         b.buy,
         b.sell,
-        d.trading_volume AS Trading_Volume
+        {price_expr}
     FROM branch_trader_daily_detail b
-    LEFT JOIN daily_total_volume d
-      ON d.stock_id = b.stock_id
-     AND d.date = b.date
     WHERE b.date BETWEEN ? AND ?
     ORDER BY b.stock_id ASC, b.securities_trader_id ASC, b.date ASC
     """
-    return pd.read_sql(sql, conn, params=(start_date, end_date, start_date, end_date))
+    return pd.read_sql(sql, conn, params=(start_date, end_date))
 
 
 def show_branch_accumulation_scan():
-    st.markdown("### 🕵️ 低檔潛伏分點掃描 (The Accumulation Scan)")
-    st.caption("全市場掃描器：不用先選股票，直接找出『連續買超、幾乎不賣、且吃下成交量』的分點。")
+    st.markdown("### 🕵️ 低檔潛伏分點掃描")
+    st.caption("以多因子模型掃描：買入穩定度 + 結構轉折 + 異常偵測 + 分點協同性。")
 
     cfg = database.load_config()
     conn = database.get_db_connection(cfg)
@@ -91,11 +81,11 @@ def show_branch_accumulation_scan():
 
     c3, c4, c5 = st.columns(3)
     with c3:
-        min_days = st.slider("連續買超天數", min_value=2, max_value=15, value=3, step=1, key="acc_scan_min_days")
+        lookback_days = st.slider("掃描回看天數", min_value=20, max_value=180, value=60, step=5, key="acc_scan_lookback")
     with c4:
-        min_ratio = st.slider("最低買賣比", min_value=3.0, max_value=100.0, value=10.0, step=1.0, key="acc_scan_min_ratio")
+        min_stability = st.slider("最低穩定度", min_value=0.3, max_value=0.95, value=0.7, step=0.05, key="acc_scan_stability")
     with c5:
-        min_share = st.slider("最低成交佔比", min_value=0.01, max_value=0.30, value=0.05, step=0.01, key="acc_scan_min_share")
+        min_coord = st.slider("最低協同性", min_value=0.1, max_value=1.0, value=0.5, step=0.05, key="acc_scan_coord")
 
     run = st.button("執行全市場低檔潛伏掃描", type="primary", use_container_width=True, key="acc_scan_run")
 
@@ -110,9 +100,9 @@ def show_branch_accumulation_scan():
             return
 
         scan_cfg = AccumulationScanConfig(
-            min_consecutive_days=min_days,
-            min_buy_sell_ratio=min_ratio,
-            min_volume_share=min_share,
+            lookback_days=int(lookback_days),
+            min_stability=float(min_stability),
+            coord_threshold=float(min_coord),
         )
         result_df = run_accumulation_scan(raw_df, scan_cfg)
         st.session_state[state_key] = result_df
@@ -124,31 +114,16 @@ def show_branch_accumulation_scan():
     result_df = st.session_state[state_key]
 
     if result_df.empty:
-        st.warning("沒有分點同時符合：連續買超、買賣比門檻與成交佔比門檻。")
+        st.warning("沒有股票同時符合進階條件：穩定吸籌、結構轉折或高度協同。")
         return
 
     display_df = result_df.head(int(top_n)).copy()
-    display_df["start_date"] = pd.to_datetime(display_df["start_date"]).dt.date
-    display_df["end_date"] = pd.to_datetime(display_df["end_date"]).dt.date
-    display_df["latest_signal_end"] = pd.to_datetime(display_df["latest_signal_end"]).dt.date
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("符合條件分點-股票組合", f"{len(result_df)}")
-    c2.metric("涉及分點數", f"{result_df['branch_id'].nunique()}")
-    c3.metric("涉及股票數", f"{result_df['stock_id'].nunique()}")
-    c4.metric("最長連買天數", f"{int(result_df['consecutive_days'].max())}")
-
-    formatters = {
-        "連續買超天數": "{:.0f}",
-        "區間買超張數": "{:.0f}",
-        "平均買賣比": "{:.2f}",
-        "平均成交佔比": "{:.2%}",
-        "符合區段數": "{:.0f}",
-    }
+    c1.metric("符合條件股票數", f"{len(result_df)}")
+    c2.metric("平均穩定度", f"{result_df['stability'].mean():.2f}")
+    c3.metric("有結構轉強", f"{int(result_df['is_shifting'].sum())}")
+    c4.metric("有異常訊號", f"{int(result_df['has_anomaly'].sum())}")
 
     localized = display_df.rename(columns=COLUMN_LABELS)
-    st.dataframe(
-        localized.style.format({k: v for k, v in formatters.items() if k in localized.columns}),
-        use_container_width=True,
-        hide_index=True,
-    )
+    st.dataframe(localized, use_container_width=True, hide_index=True)

@@ -2,12 +2,30 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+try:
+    import networkx as nx
+except ImportError:  # pragma: no cover
+    nx = None
+
+try:
+    import ruptures as rpt
+except ImportError:  # pragma: no cover
+    rpt = None
+
+try:
+    from sklearn.ensemble import IsolationForest
+except ImportError:  # pragma: no cover
+    IsolationForest = None
+
 
 @dataclass
 class AccumulationScanConfig:
-    min_consecutive_days: int = 3
-    min_buy_sell_ratio: float = 10.0
-    min_volume_share: float = 0.05
+    lookback_days: int = 60
+    min_stability: float = 0.7
+    coord_threshold: float = 0.5
+    anomaly_contamination: float = 0.05
+    changepoint_penalty: int = 10
+    changepoint_recent_days: int = 10
 
 
 def _prepare_scan_frame(raw_df: pd.DataFrame) -> pd.DataFrame:
@@ -17,23 +35,64 @@ def _prepare_scan_frame(raw_df: pd.DataFrame) -> pd.DataFrame:
     df = raw_df.copy()
     df["date"] = pd.to_datetime(df["date"])
 
-    for col in ("buy", "sell", "Trading_Volume"):
+    for col in ("buy", "sell", "price"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-    df["net_buy"] = df["buy"] - df["sell"]
-
-    # NOTE:
-    # pandas nullable dtypes + pd.NA can raise TypeError on `.astype("float")`
-    # in some versions (as seen in production traceback). Keep arithmetic as
-    # numeric with np.nan-compatible conversion to avoid NAType casting errors.
-    sell_nonzero = df["sell"].replace(0, float("nan"))
-    df["buy_sell_ratio"] = pd.to_numeric(df["buy"] / sell_nonzero, errors="coerce")
-    df["buy_sell_ratio"] = df["buy_sell_ratio"].fillna(float("inf"))
-
-    vol_nonzero = df["Trading_Volume"].replace(0, float("nan"))
-    df["volume_share"] = pd.to_numeric(df["net_buy"] / vol_nonzero, errors="coerce").fillna(0.0)
+    df["net_buy"] = pd.to_numeric(df["buy"] - df["sell"], errors="coerce").fillna(0)
     return df
+
+
+def _detect_changepoint(cumulative_net: pd.Series, penalty: int, recent_days: int) -> bool:
+    if len(cumulative_net) <= 10:
+        return False
+
+    if rpt is None:
+        return False
+
+    algo = rpt.Pelt(model="rbf").fit(cumulative_net.values)
+    points = algo.predict(pen=int(penalty))
+    return any(p > (len(cumulative_net) - int(recent_days)) for p in points[:-1])
+
+
+def _detect_anomaly(g: pd.DataFrame, contamination: float) -> bool:
+    if len(g) < 10:
+        return False
+
+    if IsolationForest is None:
+        return False
+
+    feature_cols = ["buy", "price"]
+    if "price" not in g.columns:
+        return False
+
+    feat = g[feature_cols].fillna(0).values
+    iso = IsolationForest(contamination=float(contamination), random_state=42)
+    g = g.copy()
+    g["anomaly"] = iso.fit_predict(feat)
+    return bool((g.tail(5)["anomaly"] == -1).any())
+
+
+def _coordination_score(g: pd.DataFrame, min_stability: float) -> float:
+    if g.empty:
+        return 0.0
+
+    total_days = max(g["date"].nunique(), 1)
+    branch_stability = g.groupby("branch_id").apply(lambda x: (x["net_buy"] > 0).sum() / total_days)
+    if branch_stability.empty or branch_stability.max() <= float(min_stability):
+        return 0.0
+
+    pivoted = g.pivot_table(index="date", columns="branch_id", values="net_buy", fill_value=0)
+    if pivoted.shape[1] < 2:
+        return 0.0
+
+    if nx is None:
+        return 0.0
+
+    corr_matrix = pivoted.corr()
+    G = nx.from_pandas_adjacency((corr_matrix > 0.8).astype(int))
+    centrality = nx.degree_centrality(G)
+    return float(max(centrality.values())) if centrality else 0.0
 
 
 def run_accumulation_scan(raw_df: pd.DataFrame, cfg: AccumulationScanConfig) -> pd.DataFrame:
@@ -41,61 +100,45 @@ def run_accumulation_scan(raw_df: pd.DataFrame, cfg: AccumulationScanConfig) -> 
     if df.empty:
         return pd.DataFrame()
 
-    cond = (
-        (df["net_buy"] > 0)
-        & (df["buy_sell_ratio"] > float(cfg.min_buy_sell_ratio))
-        & (df["volume_share"] >= float(cfg.min_volume_share))
-    )
-    df["is_accumulation_day"] = cond
+    latest_date = df["date"].max()
+    if pd.notna(latest_date):
+        df = df[df["date"] >= latest_date - pd.Timedelta(days=int(cfg.lookback_days))]
 
-    candidates = []
-    grouped = df.sort_values(["stock_id", "branch_id", "date"]).groupby(["stock_id", "branch_id", "branch_name"], dropna=False)
+    # 過濾當沖雜訊：淨買賣需超過買量的 10%
+    df = df[abs(df["net_buy"]) > (df["buy"] * 0.1)]
+    if df.empty:
+        return pd.DataFrame()
 
-    for (stock_id, branch_id, branch_name), g in grouped:
-        g = g.reset_index(drop=True)
-        mask = g["is_accumulation_day"].astype(bool)
-        if not mask.any():
+    final_candidates = []
+    for stock_id, g in df.groupby("stock_id"):
+        if g["date"].nunique() < 20:
             continue
 
-        streak_id = (mask != mask.shift(fill_value=False)).cumsum()
-        runs = g[mask].groupby(streak_id[mask])
+        total_days = max(g["date"].nunique(), 1)
+        stability = g.groupby("branch_id").apply(lambda x: (x["net_buy"] > 0).sum() / total_days)
+        stability_score = float(stability.max()) if not stability.empty else 0.0
 
-        valid_runs = []
-        for _, r in runs:
-            streak_days = int(len(r))
-            if streak_days < cfg.min_consecutive_days:
-                continue
-            valid_runs.append(
+        cumulative_net = g.groupby("date")["net_buy"].sum().sort_index().cumsum()
+        is_shifting = _detect_changepoint(cumulative_net, cfg.changepoint_penalty, cfg.changepoint_recent_days)
+        has_anomaly = _detect_anomaly(g.sort_values("date"), cfg.anomaly_contamination)
+        coordination_score = _coordination_score(g, min_stability=0.5)
+
+        if (stability_score > float(cfg.min_stability) and is_shifting) or (coordination_score > float(cfg.coord_threshold)):
+            final_candidates.append(
                 {
-                    "start_date": r["date"].min(),
-                    "end_date": r["date"].max(),
-                    "consecutive_days": streak_days,
-                    "net_buy_total": float(r["net_buy"].sum()),
-                    "avg_buy_sell_ratio": float(r["buy_sell_ratio"].replace(float("inf"), pd.NA).mean(skipna=True) or 9999.0),
-                    "avg_volume_share": float(r["volume_share"].mean()),
+                    "stock_id": stock_id,
+                    "stability": round(stability_score, 2),
+                    "is_shifting": bool(is_shifting),
+                    "has_anomaly": bool(has_anomaly),
+                    "coordination_score": round(coordination_score, 2),
                 }
             )
 
-        if not valid_runs:
-            continue
-
-        best_run = max(valid_runs, key=lambda x: (x["consecutive_days"], x["net_buy_total"]))
-        candidates.append(
-            {
-                "stock_id": stock_id,
-                "branch_id": branch_id,
-                "branch_name": branch_name,
-                **best_run,
-                "signal_count": len(valid_runs),
-                "latest_signal_end": max(x["end_date"] for x in valid_runs),
-            }
-        )
-
-    if not candidates:
+    if not final_candidates:
         return pd.DataFrame()
 
-    out = pd.DataFrame(candidates).sort_values(
-        ["consecutive_days", "avg_volume_share", "net_buy_total", "latest_signal_end"],
-        ascending=[False, False, False, False],
+    out = pd.DataFrame(final_candidates).sort_values(
+        ["stability", "coordination_score", "has_anomaly"],
+        ascending=[False, False, False],
     )
     return out.reset_index(drop=True)
