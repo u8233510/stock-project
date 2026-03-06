@@ -618,6 +618,19 @@ python utility/finmind_branch_collector.py \
 到「⚙️ 資料同步管理」頁籤，選：
 - `🏦 FinMind 分點明細同步 (分點+日期)`
 
+### 股票資訊同步（taiwan_stock_info_with_warrant）
+
+在「⚙️ 資料同步管理」新增：
+- `🏦 FinMind 股票資訊同步`
+
+功能會呼叫 `taiwan_stock_info_with_warrant`，並將結果寫入：
+- `stock_info`（主資料表）
+- `stock_info_sync_log`（同步狀態紀錄）
+
+同步完成後，會另外輸出快照檔：
+- `data/stock_info_raw/stock_info_snapshot.csv`
+
+
 填入 Token、分點代碼、日期區間即可同步，同步結果會顯示在頁面表格中。
 
 建議在 `config.json` 加上：
