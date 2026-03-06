@@ -235,8 +235,40 @@ def show_branch_analysis():
     st.markdown("### 🔍 專業級分點籌碼與產業聯動診斷")
     cfg = database.load_config()
     conn = database.get_db_connection(cfg)
+
+    # 以分點明細為主：優先 branch_trader_daily_detail，無資料時回退 branch_price_daily。
+    primary_rows = conn.execute(
+        """
+        SELECT DISTINCT stock_id
+        FROM branch_trader_daily_detail
+        WHERE stock_id IS NOT NULL AND stock_id != ''
+        ORDER BY stock_id ASC
+        """
+    ).fetchall()
+    source_table = "branch_trader_daily_detail" if primary_rows else "branch_price_daily"
+
+    stock_rows = primary_rows if primary_rows else conn.execute(
+        """
+        SELECT DISTINCT stock_id
+        FROM branch_price_daily
+        WHERE stock_id IS NOT NULL AND stock_id != ''
+        ORDER BY stock_id ASC
+        """
+    ).fetchall()
+    stock_ids = [str(r[0]) for r in stock_rows if r and r[0]]
+
     universe = cfg.get("universe", [])
-    stock_options = {f"{s['stock_id']} {s['name']}": s['stock_id'] for s in universe}
+    name_map = {str(s.get("stock_id")): s.get("name", "") for s in universe if s.get("stock_id")}
+
+    stock_options = {
+        (f"{sid} {name_map[sid]}".strip() if name_map.get(sid) else sid): sid
+        for sid in stock_ids
+    }
+
+    if not stock_options:
+        st.warning("分點明細資料表尚無可分析股票，請先同步資料。")
+        conn.close()
+        return
 
     c1, c2, c3, c4, c5 = st.columns([1.7, 1.5, 1.1, 0.7, 1.2])
     with c1:
@@ -244,9 +276,9 @@ def show_branch_analysis():
         sid = stock_options[sid_label]
 
     date_bounds = conn.execute(
-        """
+        f"""
         SELECT MIN(date), MAX(date)
-        FROM branch_price_daily
+        FROM {source_table}
         WHERE stock_id = ?
         """,
         (sid,),
@@ -298,20 +330,20 @@ def show_branch_analysis():
 
     try:
         current_price = conn.execute(f"SELECT close FROM stock_ohlcv_daily WHERE stock_id='{sid}' ORDER BY date DESC LIMIT 1").fetchone()[0] or 0
-        total_vol = conn.execute(f"SELECT SUM(buy) FROM branch_price_daily WHERE stock_id='{sid}' AND {date_sql}").fetchone()[0] or 1
+        total_vol = conn.execute(f"SELECT SUM(buy) FROM {source_table} WHERE stock_id='{sid}' AND {date_sql}").fetchone()[0] or 1
 
         df = pd.read_sql(f"""
             SELECT securities_trader AS "分點", SUM(buy - sell) AS "淨張數", 
                    ROUND(SUM((buy - sell) * price) / NULLIF(SUM(buy - sell), 0), 2) AS "均價"
-            FROM branch_price_daily WHERE stock_id = '{sid}' AND {date_sql}
+            FROM {source_table} WHERE stock_id = '{sid}' AND {date_sql}
             GROUP BY securities_trader HAVING "淨張數" != 0 ORDER BY ABS("淨張數") DESC LIMIT 20
         """, conn)
         df['獲利%'] = (((current_price - df['均價']) / df['均價']) * 100).round(2)
 
         interval_df = pd.read_sql(
-            """
+            f"""
             SELECT securities_trader_id, price, buy, sell
-            FROM branch_price_daily
+            FROM {source_table}
             WHERE stock_id = ? AND date >= ? AND date <= ?
             """,
             conn,
@@ -384,9 +416,9 @@ def show_branch_analysis():
         w1, w2, w3 = st.columns(3)
         for col, window in zip([w1, w2, w3], [5, 20, 60]):
             hist_dates = conn.execute(
-                """
+                f"""
                 SELECT DISTINCT date
-                FROM branch_price_daily
+                FROM {source_table}
                 WHERE stock_id = ?
                 ORDER BY date DESC
                 LIMIT ?
@@ -399,9 +431,9 @@ def show_branch_analysis():
                     dates = sorted([str(d[0])[:10] for d in hist_dates if d and d[0]])
                     win_start, win_end = dates[0], dates[-1]
                     snap_df = pd.read_sql(
-                        """
+                        f"""
                         SELECT securities_trader_id, price, buy, sell
-                        FROM branch_price_daily
+                        FROM {source_table}
                         WHERE stock_id = ?
                           AND date >= ?
                           AND date <= ?
