@@ -21,10 +21,10 @@ except ImportError:  # pragma: no cover
 @dataclass
 class AccumulationScanConfig:
     lookback_days: int = 60
-    min_stability: float = 0.7
+    min_stability: float = 0.5
     coord_threshold: float = 0.5
     anomaly_contamination: float = 0.05
-    changepoint_penalty: int = 10
+    changepoint_penalty: int = 8
     changepoint_recent_days: int = 10
 
 
@@ -70,7 +70,7 @@ def _detect_anomaly(g: pd.DataFrame, contamination: float) -> bool:
     iso = IsolationForest(contamination=float(contamination), random_state=42)
     g = g.copy()
     g["anomaly"] = iso.fit_predict(feat)
-    return bool((g.tail(5)["anomaly"] == -1).any())
+    return bool((g.tail(3)["anomaly"] == -1).any())
 
 
 def _coordination_score(g: pd.DataFrame, min_stability: float) -> float:
@@ -90,7 +90,7 @@ def _coordination_score(g: pd.DataFrame, min_stability: float) -> float:
         return 0.0
 
     corr_matrix = pivoted.corr()
-    G = nx.from_pandas_adjacency((corr_matrix > 0.8).astype(int))
+    G = nx.from_pandas_adjacency((corr_matrix > 0.7).astype(int))
     centrality = nx.degree_centrality(G)
     return float(max(centrality.values())) if centrality else 0.0
 
@@ -104,8 +104,8 @@ def run_accumulation_scan(raw_df: pd.DataFrame, cfg: AccumulationScanConfig) -> 
     if pd.notna(latest_date):
         df = df[df["date"] >= latest_date - pd.Timedelta(days=int(cfg.lookback_days))]
 
-    # 過濾當沖雜訊：淨買賣需超過買量的 10%
-    df = df[abs(df["net_buy"]) > (df["buy"] * 0.1)]
+    # 過濾當沖雜訊：淨買賣需超過買量的 5%
+    df = df[abs(df["net_buy"]) > (df["buy"] * 0.05)]
     if df.empty:
         return pd.DataFrame()
 
@@ -118,19 +118,35 @@ def run_accumulation_scan(raw_df: pd.DataFrame, cfg: AccumulationScanConfig) -> 
         stability = g.groupby("branch_id").apply(lambda x: (x["net_buy"] > 0).sum() / total_days)
         stability_score = float(stability.max()) if not stability.empty else 0.0
 
+        buyers = g[g["net_buy"] > 0]["branch_id"].nunique()
+        sellers = g[g["net_buy"] < 0]["branch_id"].nunique()
+        participant_diff = int(buyers - sellers)
+
         cumulative_net = g.groupby("date")["net_buy"].sum().sort_index().cumsum()
         is_shifting = _detect_changepoint(cumulative_net, cfg.changepoint_penalty, cfg.changepoint_recent_days)
         has_anomaly = _detect_anomaly(g.sort_values("date"), cfg.anomaly_contamination)
-        coordination_score = _coordination_score(g, min_stability=0.5)
+        coordination_score = _coordination_score(g, min_stability=0.4)
 
-        if (stability_score > float(cfg.min_stability) and is_shifting) or (coordination_score > float(cfg.coord_threshold)):
+        final_score = 0
+        if stability_score >= float(cfg.min_stability):
+            final_score += 40
+        if is_shifting:
+            final_score += 30
+        if coordination_score >= float(cfg.coord_threshold):
+            final_score += 30
+        if participant_diff < 0:
+            final_score += 10
+
+        if final_score >= 50:
             final_candidates.append(
                 {
                     "stock_id": stock_id,
+                    "final_score": int(final_score),
                     "stability": round(stability_score, 2),
                     "is_shifting": bool(is_shifting),
                     "has_anomaly": bool(has_anomaly),
                     "coordination_score": round(coordination_score, 2),
+                    "participant_diff": participant_diff,
                 }
             )
 
@@ -138,7 +154,7 @@ def run_accumulation_scan(raw_df: pd.DataFrame, cfg: AccumulationScanConfig) -> 
         return pd.DataFrame()
 
     out = pd.DataFrame(final_candidates).sort_values(
-        ["stability", "coordination_score", "has_anomaly"],
-        ascending=[False, False, False],
+        ["final_score", "stability", "coordination_score", "has_anomaly"],
+        ascending=[False, False, False, False],
     )
     return out.reset_index(drop=True)
