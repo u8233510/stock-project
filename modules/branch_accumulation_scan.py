@@ -10,7 +10,9 @@ COLUMN_LABELS = {
     "stability": "買入穩定度",
     "is_shifting": "結構轉強",
     "has_anomaly": "異常訊號",
+    "final_score": "綜合評分",
     "coordination_score": "集團協同性",
+    "participant_diff": "家數差",
 }
 
 
@@ -83,7 +85,7 @@ def show_branch_accumulation_scan():
     with c3:
         lookback_days = st.slider("掃描回看天數", min_value=20, max_value=180, value=60, step=5, key="acc_scan_lookback")
     with c4:
-        min_stability = st.slider("最低穩定度", min_value=0.3, max_value=0.95, value=0.7, step=0.05, key="acc_scan_stability")
+        min_stability = st.slider("最低穩定度", min_value=0.3, max_value=0.95, value=0.5, step=0.05, key="acc_scan_stability")
     with c5:
         min_coord = st.slider("最低協同性", min_value=0.1, max_value=1.0, value=0.5, step=0.05, key="acc_scan_coord")
 
