@@ -171,8 +171,8 @@ def _load_branch_raw(conn, sid: str, start_date: str, end_date: str) -> pd.DataF
     SELECT
         b.stock_id,
         b.date,
-        b.branch_id,
-        b.branch_name,
+        b.securities_trader_id AS branch_id,
+        b.securities_trader AS branch_name,
         b.price,
         b.buy,
         b.sell,
