@@ -11,7 +11,8 @@ COLUMN_LABELS = {
     "is_shifting": "結構轉強",
     "has_anomaly": "異常訊號",
     "final_score": "綜合評分",
-    "coordination_score": "集團協同性",
+    "stock_name": "股票名稱",
+    "coordination_score": "分點協同性",
     "participant_diff": "家數差",
 }
 
@@ -26,8 +27,20 @@ def _load_scan_raw(conn, start_date: str, end_date: str) -> pd.DataFrame:
         price_expr = "NULL AS price"
 
     sql = f"""
+    WITH latest_stock_info AS (
+        SELECT s.stock_id, s.stock_name
+        FROM stock_info s
+        INNER JOIN (
+            SELECT stock_id, MAX(date) AS max_date
+            FROM stock_info
+            GROUP BY stock_id
+        ) latest
+          ON s.stock_id = latest.stock_id
+         AND s.date = latest.max_date
+    )
     SELECT
         b.stock_id,
+        COALESCE(si.stock_name, '') AS stock_name,
         b.date,
         b.securities_trader_id AS branch_id,
         b.securities_trader AS branch_name,
@@ -35,6 +48,7 @@ def _load_scan_raw(conn, start_date: str, end_date: str) -> pd.DataFrame:
         b.sell,
         {price_expr}
     FROM branch_trader_daily_detail b
+    LEFT JOIN latest_stock_info si ON si.stock_id = b.stock_id
     WHERE b.date BETWEEN ? AND ?
     ORDER BY b.stock_id ASC, b.securities_trader_id ASC, b.date ASC
     """
@@ -92,6 +106,31 @@ def show_branch_accumulation_scan():
     with c6:
         score_threshold = st.slider("最低綜合分數(%)", min_value=0, max_value=100, value=50, step=5, key="acc_scan_score_threshold")
 
+    st.markdown("#### 進階參數")
+    p_adv1, p_adv2, p_adv3, p_adv4 = st.columns(4)
+    with p_adv1:
+        changepoint_penalty = st.slider("變點偵測敏感度(Penalty)", min_value=1, max_value=20, value=5, step=1, key="acc_scan_changepoint_penalty")
+        shift_recent_days = st.slider("變點近期天數", min_value=3, max_value=30, value=7, step=1, key="acc_scan_shift_recent_days")
+    with p_adv2:
+        min_shift_days = st.slider("變點最小樣本天數", min_value=5, max_value=60, value=10, step=1, key="acc_scan_min_shift_days")
+        anomaly_contamination = st.slider("異常偵測比例", min_value=0.01, max_value=0.2, value=0.05, step=0.01, key="acc_scan_anomaly_contamination")
+    with p_adv3:
+        anomaly_recent_days = st.slider("異常近期觀察天數", min_value=1, max_value=10, value=3, step=1, key="acc_scan_anomaly_recent_days")
+        min_anomaly_samples = st.slider("異常最小樣本筆數", min_value=5, max_value=50, value=10, step=1, key="acc_scan_min_anomaly_samples")
+    with p_adv4:
+        corr_threshold = st.slider("協同性相關係數門檻", min_value=0.3, max_value=0.95, value=0.7, step=0.05, key="acc_scan_corr_threshold")
+        stability_gate = st.slider("啟動協同性最低穩定度", min_value=0.1, max_value=0.95, value=0.3, step=0.05, key="acc_scan_stability_gate")
+
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        net_buy_noise_ratio = st.slider("淨買超雜訊過濾比率", min_value=0.0, max_value=0.2, value=0.05, step=0.01, key="acc_scan_noise_ratio")
+    with s2:
+        score_stability = st.slider("穩定度配分", min_value=0, max_value=100, value=40, step=5, key="acc_scan_score_stability")
+        score_shifting = st.slider("結構轉強配分", min_value=0, max_value=100, value=20, step=5, key="acc_scan_score_shifting")
+    with s3:
+        score_coord = st.slider("分點協同性配分", min_value=0, max_value=100, value=20, step=5, key="acc_scan_score_coord")
+        score_anomaly = st.slider("異常訊號配分", min_value=0, max_value=100, value=10, step=5, key="acc_scan_score_anomaly")
+        score_participant = st.slider("家數差配分", min_value=0, max_value=100, value=10, step=5, key="acc_scan_score_participant")
 
     state_key = "accumulation_scan_result"
     running_key = "acc_scan_running"
@@ -137,6 +176,20 @@ def show_branch_accumulation_scan():
             min_stability=float(min_stability),
             coord_threshold=float(min_coord),
             final_score_threshold=int(score_threshold),
+            anomaly_contamination=float(anomaly_contamination),
+            changepoint_penalty=int(changepoint_penalty),
+            changepoint_recent_days=int(shift_recent_days),
+            min_shift_days=int(min_shift_days),
+            anomaly_recent_days=int(anomaly_recent_days),
+            min_anomaly_samples=int(min_anomaly_samples),
+            coordination_corr_threshold=float(corr_threshold),
+            coordination_stability_gate=float(stability_gate),
+            net_buy_noise_ratio=float(net_buy_noise_ratio),
+            score_stability=int(score_stability),
+            score_shifting=int(score_shifting),
+            score_coordination=int(score_coord),
+            score_anomaly=int(score_anomaly),
+            score_participant_diff=int(score_participant),
         )
         result_df = run_accumulation_scan(raw_df, scan_cfg)
         progress_bar.progress(100, text="掃描完成")
@@ -156,6 +209,7 @@ def show_branch_accumulation_scan():
         return
 
     display_df = result_df.head(int(top_n)).copy()
+    export_df = result_df.copy()
     page_size = 20
     total_rows = len(display_df)
     total_pages = max((total_rows - 1) // page_size + 1, 1)
@@ -190,3 +244,13 @@ def show_branch_accumulation_scan():
 
     localized = page_df.rename(columns=COLUMN_LABELS)
     st.dataframe(localized, use_container_width=True, hide_index=True)
+
+    export_localized = export_df.rename(columns=COLUMN_LABELS)
+    csv_data = export_localized.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        "下載完整結果 CSV（全部符合資料）",
+        data=csv_data,
+        file_name=f"branch_accumulation_scan_{start_d}_{end_d}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
