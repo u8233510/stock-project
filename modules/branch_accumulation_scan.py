@@ -80,6 +80,7 @@ def show_branch_accumulation_scan():
         return
 
     start_d, end_d = date_range
+    available_days = max((pd.Timestamp(end_d) - pd.Timestamp(start_d)).days + 1, 1)
 
     c3, c4, c5, c6 = st.columns(4)
     with c3:
@@ -94,6 +95,12 @@ def show_branch_accumulation_scan():
 
     run = st.button("執行全市場低檔潛伏掃描", type="primary", use_container_width=True, key="acc_scan_run")
 
+    effective_lookback = min(int(lookback_days), int(available_days))
+    if effective_lookback < int(lookback_days):
+        st.caption(
+            f"⚠️ 目前日期區間僅有 {available_days} 天資料，將自動以 {effective_lookback} 天進行掃描。"
+        )
+
     state_key = "accumulation_scan_result"
     if run:
         with st.spinner("掃描中，請稍候..."):
@@ -105,7 +112,7 @@ def show_branch_accumulation_scan():
             return
 
         scan_cfg = AccumulationScanConfig(
-            lookback_days=int(lookback_days),
+            lookback_days=effective_lookback,
             min_stability=float(min_stability),
             coord_threshold=float(min_coord),
             final_score_threshold=int(score_threshold),
