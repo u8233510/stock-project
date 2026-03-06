@@ -9,13 +9,11 @@ COLUMN_LABELS = {
     "stock_id": "股票代號",
     "branch_id": "分點代號",
     "branch_name": "分點名稱",
-    "start_date": "訊號起始日",
-    "end_date": "訊號結束日",
-    "consecutive_days": "連續買超天數",
-    "net_buy_total": "區間買超張數",
-    "avg_buy_sell_ratio": "平均買賣比",
-    "avg_volume_share": "平均成交佔比",
-    "signal_count": "符合區段數",
+    "buying_stability": "買入穩定度",
+    "structure_shift": "結構性轉強",
+    "recent_anomaly": "異常吸籌訊號",
+    "observed_days": "觀測天數",
+    "signal_reason": "觸發原因",
     "latest_signal_end": "最近訊號日",
 }
 
@@ -50,8 +48,8 @@ def _load_scan_raw(conn, start_date: str, end_date: str) -> pd.DataFrame:
 
 
 def show_branch_accumulation_scan():
-    st.markdown("### 🕵️ 低檔潛伏分點掃描 (The Accumulation Scan)")
-    st.caption("全市場掃描器：不用先選股票，直接找出『連續買超、幾乎不賣、且吃下成交量』的分點。")
+    st.markdown("### 🕵️ 偷偷吸籌全市場掃描")
+    st.caption("結合穩定買超、結構轉強與異常吸籌偵測，找出可能的暗中吸籌分點。")
 
     cfg = database.load_config()
     conn = database.get_db_connection(cfg)
@@ -91,13 +89,13 @@ def show_branch_accumulation_scan():
 
     c3, c4, c5 = st.columns(3)
     with c3:
-        min_days = st.slider("連續買超天數", min_value=2, max_value=15, value=3, step=1, key="acc_scan_min_days")
+        min_days = st.slider("最小觀測天數", min_value=20, max_value=120, value=30, step=5, key="acc_scan_min_days")
     with c4:
-        min_ratio = st.slider("最低買賣比", min_value=3.0, max_value=100.0, value=10.0, step=1.0, key="acc_scan_min_ratio")
+        min_ratio = st.slider("高穩定閾值", min_value=0.50, max_value=0.95, value=0.70, step=0.05, key="acc_scan_min_ratio")
     with c5:
-        min_share = st.slider("最低成交佔比", min_value=0.01, max_value=0.30, value=0.05, step=0.01, key="acc_scan_min_share")
+        min_share = st.slider("中穩定閾值", min_value=0.30, max_value=0.80, value=0.50, step=0.05, key="acc_scan_min_share")
 
-    run = st.button("執行全市場低檔潛伏掃描", type="primary", use_container_width=True, key="acc_scan_run")
+    run = st.button("執行全市場偷偷吸籌掃描", type="primary", use_container_width=True, key="acc_scan_run")
 
     state_key = "accumulation_scan_result"
     if run:
@@ -110,40 +108,35 @@ def show_branch_accumulation_scan():
             return
 
         scan_cfg = AccumulationScanConfig(
-            min_consecutive_days=min_days,
-            min_buy_sell_ratio=min_ratio,
-            min_volume_share=min_share,
+            min_observed_days=min_days,
+            high_stability_threshold=min_ratio,
+            medium_stability_threshold=min_share,
         )
         result_df = run_accumulation_scan(raw_df, scan_cfg)
         st.session_state[state_key] = result_df
 
     if state_key not in st.session_state:
-        st.info("請先設定條件後，點擊「執行全市場低檔潛伏掃描」。")
+        st.info("請先設定條件後，點擊「執行全市場偷偷吸籌掃描」。")
         return
 
     result_df = st.session_state[state_key]
 
     if result_df.empty:
-        st.warning("沒有分點同時符合：連續買超、買賣比門檻與成交佔比門檻。")
+        st.warning("沒有分點符合偷偷吸籌條件（穩定度、結構轉強、異常吸籌）。")
         return
 
     display_df = result_df.head(int(top_n)).copy()
-    display_df["start_date"] = pd.to_datetime(display_df["start_date"]).dt.date
-    display_df["end_date"] = pd.to_datetime(display_df["end_date"]).dt.date
     display_df["latest_signal_end"] = pd.to_datetime(display_df["latest_signal_end"]).dt.date
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("符合條件分點-股票組合", f"{len(result_df)}")
     c2.metric("涉及分點數", f"{result_df['branch_id'].nunique()}")
     c3.metric("涉及股票數", f"{result_df['stock_id'].nunique()}")
-    c4.metric("最長連買天數", f"{int(result_df['consecutive_days'].max())}")
+    c4.metric("最高買入穩定度", f"{result_df['buying_stability'].max():.2f}")
 
     formatters = {
-        "連續買超天數": "{:.0f}",
-        "區間買超張數": "{:.0f}",
-        "平均買賣比": "{:.2f}",
-        "平均成交佔比": "{:.2%}",
-        "符合區段數": "{:.0f}",
+        "買入穩定度": "{:.2f}",
+        "觀測天數": "{:.0f}",
     }
 
     localized = display_df.rename(columns=COLUMN_LABELS)
