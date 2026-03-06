@@ -22,12 +22,17 @@ def _prepare_scan_frame(raw_df: pd.DataFrame) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
     df["net_buy"] = df["buy"] - df["sell"]
-    sell_nonzero = df["sell"].replace(0, pd.NA)
-    df["buy_sell_ratio"] = (df["buy"] / sell_nonzero).astype("float")
+
+    # NOTE:
+    # pandas nullable dtypes + pd.NA can raise TypeError on `.astype("float")`
+    # in some versions (as seen in production traceback). Keep arithmetic as
+    # numeric with np.nan-compatible conversion to avoid NAType casting errors.
+    sell_nonzero = df["sell"].replace(0, float("nan"))
+    df["buy_sell_ratio"] = pd.to_numeric(df["buy"] / sell_nonzero, errors="coerce")
     df["buy_sell_ratio"] = df["buy_sell_ratio"].fillna(float("inf"))
 
-    vol_nonzero = df["Trading_Volume"].replace(0, pd.NA)
-    df["volume_share"] = (df["net_buy"] / vol_nonzero).astype("float").fillna(0.0)
+    vol_nonzero = df["Trading_Volume"].replace(0, float("nan"))
+    df["volume_share"] = pd.to_numeric(df["net_buy"] / vol_nonzero, errors="coerce").fillna(0.0)
     return df
 
 
