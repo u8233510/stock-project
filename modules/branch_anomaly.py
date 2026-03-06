@@ -166,40 +166,27 @@ def _build_holding_style(events_df: pd.DataFrame) -> pd.DataFrame:
 
     return out
 
-def _load_branch_raw(conn, start_date: str, end_date: str) -> pd.DataFrame:
+def _load_branch_raw(conn, sid: str, start_date: str, end_date: str) -> pd.DataFrame:
     sql = """
-    WITH daily_close_proxy AS (
-        SELECT
-            stock_id,
-            date,
-            COALESCE(
-                SUM(price * (COALESCE(buy, 0) + COALESCE(sell, 0)))
-                / NULLIF(SUM(COALESCE(buy, 0) + COALESCE(sell, 0)), 0),
-                AVG(price)
-            ) AS close_proxy
-        FROM branch_trader_daily_detail
-        WHERE date >= ?
-          AND date <= ?
-        GROUP BY stock_id, date
-    )
     SELECT
         b.stock_id,
         b.date,
-        b.securities_trader_id AS branch_id,
-        b.securities_trader AS branch_name,
+        b.branch_id,
+        b.branch_name,
         b.price,
         b.buy,
         b.sell,
-        COALESCE(d.close_proxy, b.price) AS close
-    FROM branch_trader_daily_detail b
-    LEFT JOIN daily_close_proxy d
-      ON b.stock_id = d.stock_id
-     AND b.date = d.date
-    WHERE b.date >= ?
+        o.close
+    FROM branch_price_daily b
+    JOIN stock_ohlcv_daily o
+      ON b.stock_id = o.stock_id
+     AND b.date = o.date
+    WHERE b.stock_id = ?
+      AND b.date >= ?
       AND b.date <= ?
-    ORDER BY b.stock_id ASC, b.date ASC
+    ORDER BY b.date ASC
     """
-    return pd.read_sql(sql, conn, params=(start_date, end_date, start_date, end_date))
+    return pd.read_sql(sql, conn, params=(sid, start_date, end_date))
 
 
 def _build_stock_opportunity_table(events_df: pd.DataFrame) -> pd.DataFrame:
@@ -250,18 +237,31 @@ def _render_summary_cards(anomaly_events: pd.DataFrame, watchlist: pd.DataFrame)
 
 def show_branch_anomaly():
     st.markdown("### 🚨 分點異常偵測")
-    st.caption("全市場掃描版：直接分析資料庫中的所有分點進出明細，找出可買與主力賣壓標的。")
+    st.caption("重新設計：先看結論，再看細節，避免欄位過載。")
 
     cfg = database.load_config()
     conn = database.get_db_connection(cfg)
 
+    universe = cfg.get("universe", [])
+    if not universe:
+        st.warning("config.json 未設定 universe。")
+        return
+
+    stock_options = {f"{s['stock_id']} {s['name']}": s['stock_id'] for s in universe}
+
     with st.container(border=True):
-        c1, c2 = st.columns([1.8, 1.2])
+        c1, c2, c3 = st.columns([1.8, 1.8, 1.2])
+        with c1:
+            sid_label = st.selectbox("標的", list(stock_options.keys()))
+            sid = stock_options[sid_label]
+
         date_bounds = conn.execute(
             """
             SELECT MIN(date), MAX(date)
-            FROM branch_trader_daily_detail
-            """
+            FROM branch_price_daily
+            WHERE stock_id = ?
+            """,
+            (sid,),
         ).fetchone()
 
         min_date_raw, max_date_raw = date_bounds if date_bounds else (None, None)
@@ -269,18 +269,18 @@ def show_branch_anomaly():
         max_date = pd.to_datetime(max_date_raw).date() if max_date_raw else None
 
         if not min_date or not max_date:
-            st.info("目前 branch_trader_daily_detail 尚無資料。")
+            st.info("此標的尚無分點資料。")
             return
 
-        with c1:
+        with c2:
             date_range = st.date_input(
-                "掃描日期區間",
+                "日期區間",
                 value=[max(min_date, max_date - pd.Timedelta(days=120)), max_date],
                 min_value=min_date,
                 max_value=max_date,
             )
 
-        with c2:
+        with c3:
             top_n = st.number_input("顯示筆數", min_value=10, max_value=200, value=50, step=10)
 
         if isinstance(date_range, tuple) or isinstance(date_range, list):
@@ -304,7 +304,7 @@ def show_branch_anomaly():
 
     state_key = "branch_anomaly_result"
     if run:
-        raw_df = _load_branch_raw(conn, str(start_d), str(end_d))
+        raw_df = _load_branch_raw(conn, sid, str(start_d), str(end_d))
         if raw_df.empty:
             st.info("選定區間內無可用資料。")
             st.session_state.pop(state_key, None)
@@ -324,6 +324,7 @@ def show_branch_anomaly():
         classified_watchlist = _build_holding_style(watchlist) if not watchlist.empty else watchlist
         stock_opportunities = _build_stock_opportunity_table(classified_events)
         st.session_state[state_key] = {
+            "sid": sid,
             "start_d": str(start_d),
             "end_d": str(end_d),
             "anomaly_events": anomaly_events,
