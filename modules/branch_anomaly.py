@@ -46,6 +46,8 @@ LEVEL_LABELS = {
 }
 
 ACTION_ORDER = ["偷偷進貨", "偷偷在賣", "供給籌碼", "承接籌碼", "偏買", "偏賣", "中性"]
+BUY_ACTIONS = ["偷偷進貨", "承接籌碼", "偏買"]
+SELL_ACTIONS = ["偷偷在賣", "供給籌碼", "偏賣"]
 
 def _localize_table(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
@@ -164,8 +166,22 @@ def _build_holding_style(events_df: pd.DataFrame) -> pd.DataFrame:
 
     return out
 
-def _load_branch_raw(conn, sid: str, start_date: str, end_date: str) -> pd.DataFrame:
+def _load_branch_raw(conn, start_date: str, end_date: str) -> pd.DataFrame:
     sql = """
+    WITH daily_close_proxy AS (
+        SELECT
+            stock_id,
+            date,
+            COALESCE(
+                SUM(price * (COALESCE(buy, 0) + COALESCE(sell, 0)))
+                / NULLIF(SUM(COALESCE(buy, 0) + COALESCE(sell, 0)), 0),
+                AVG(price)
+            ) AS close_proxy
+        FROM branch_trader_daily_detail
+        WHERE date >= ?
+          AND date <= ?
+        GROUP BY stock_id, date
+    )
     SELECT
         b.stock_id,
         b.date,
@@ -174,17 +190,48 @@ def _load_branch_raw(conn, sid: str, start_date: str, end_date: str) -> pd.DataF
         b.price,
         b.buy,
         b.sell,
-        o.close
-    FROM branch_price_daily b
-    JOIN stock_ohlcv_daily o
-      ON b.stock_id = o.stock_id
-     AND b.date = o.date
-    WHERE b.stock_id = ?
-      AND b.date >= ?
+        COALESCE(d.close_proxy, b.price) AS close
+    FROM branch_trader_daily_detail b
+    LEFT JOIN daily_close_proxy d
+      ON b.stock_id = d.stock_id
+     AND b.date = d.date
+    WHERE b.date >= ?
       AND b.date <= ?
-    ORDER BY b.date ASC
+    ORDER BY b.stock_id ASC, b.date ASC
     """
-    return pd.read_sql(sql, conn, params=(sid, start_date, end_date))
+    return pd.read_sql(sql, conn, params=(start_date, end_date, start_date, end_date))
+
+
+def _build_stock_opportunity_table(events_df: pd.DataFrame) -> pd.DataFrame:
+    if events_df.empty:
+        return pd.DataFrame()
+
+    scoped = events_df[events_df["event_days"] > 0].copy()
+    if scoped.empty:
+        return pd.DataFrame()
+
+    scoped["buy_signal_score"] = scoped["anomaly_score"].where(scoped["dominant_action"].isin(BUY_ACTIONS), 0.0)
+    scoped["sell_signal_score"] = scoped["anomaly_score"].where(scoped["dominant_action"].isin(SELL_ACTIONS), 0.0)
+
+    summary = (
+        scoped.groupby("stock_id", as_index=False)
+        .agg(
+            branch_count=("branch_id", "nunique"),
+            active_branch_count=("event_days", lambda s: int((s > 0).sum())),
+            total_event_days=("event_days", "sum"),
+            avg_anomaly_score=("anomaly_score", "mean"),
+            buy_signal_score=("buy_signal_score", "sum"),
+            sell_signal_score=("sell_signal_score", "sum"),
+            net_flow_ratio=("net_flow_ratio", "mean"),
+        )
+        .sort_values(["buy_signal_score", "sell_signal_score", "avg_anomaly_score"], ascending=[False, False, False])
+        .reset_index(drop=True)
+    )
+
+    summary["bias"] = "中性"
+    summary.loc[summary["buy_signal_score"] > summary["sell_signal_score"], "bias"] = "偏多（可留意買點）"
+    summary.loc[summary["sell_signal_score"] > summary["buy_signal_score"], "bias"] = "偏空（主力賣壓）"
+    return summary
 
 
 def _render_summary_cards(anomaly_events: pd.DataFrame, watchlist: pd.DataFrame) -> None:
@@ -203,31 +250,18 @@ def _render_summary_cards(anomaly_events: pd.DataFrame, watchlist: pd.DataFrame)
 
 def show_branch_anomaly():
     st.markdown("### 🚨 分點異常偵測")
-    st.caption("重新設計：先看結論，再看細節，避免欄位過載。")
+    st.caption("全市場掃描版：直接分析資料庫中的所有分點進出明細，找出可買與主力賣壓標的。")
 
     cfg = database.load_config()
     conn = database.get_db_connection(cfg)
 
-    universe = cfg.get("universe", [])
-    if not universe:
-        st.warning("config.json 未設定 universe。")
-        return
-
-    stock_options = {f"{s['stock_id']} {s['name']}": s['stock_id'] for s in universe}
-
     with st.container(border=True):
-        c1, c2, c3 = st.columns([1.8, 1.8, 1.2])
-        with c1:
-            sid_label = st.selectbox("標的", list(stock_options.keys()))
-            sid = stock_options[sid_label]
-
+        c1, c2 = st.columns([1.8, 1.2])
         date_bounds = conn.execute(
             """
             SELECT MIN(date), MAX(date)
-            FROM branch_price_daily
-            WHERE stock_id = ?
-            """,
-            (sid,),
+            FROM branch_trader_daily_detail
+            """
         ).fetchone()
 
         min_date_raw, max_date_raw = date_bounds if date_bounds else (None, None)
@@ -235,18 +269,18 @@ def show_branch_anomaly():
         max_date = pd.to_datetime(max_date_raw).date() if max_date_raw else None
 
         if not min_date or not max_date:
-            st.info("此標的尚無分點資料。")
+            st.info("目前 branch_trader_daily_detail 尚無資料。")
             return
 
-        with c2:
+        with c1:
             date_range = st.date_input(
-                "日期區間",
+                "掃描日期區間",
                 value=[max(min_date, max_date - pd.Timedelta(days=120)), max_date],
                 min_value=min_date,
                 max_value=max_date,
             )
 
-        with c3:
+        with c2:
             top_n = st.number_input("顯示筆數", min_value=10, max_value=200, value=50, step=10)
 
         if isinstance(date_range, tuple) or isinstance(date_range, list):
@@ -270,7 +304,7 @@ def show_branch_anomaly():
 
     state_key = "branch_anomaly_result"
     if run:
-        raw_df = _load_branch_raw(conn, sid, str(start_d), str(end_d))
+        raw_df = _load_branch_raw(conn, str(start_d), str(end_d))
         if raw_df.empty:
             st.info("選定區間內無可用資料。")
             st.session_state.pop(state_key, None)
@@ -288,8 +322,8 @@ def show_branch_anomaly():
         anomaly_events, watchlist, weekly_report = build_anomaly_outputs(raw_df, detector_cfg)
         classified_events = _build_holding_style(anomaly_events)
         classified_watchlist = _build_holding_style(watchlist) if not watchlist.empty else watchlist
+        stock_opportunities = _build_stock_opportunity_table(classified_events)
         st.session_state[state_key] = {
-            "sid": sid,
             "start_d": str(start_d),
             "end_d": str(end_d),
             "anomaly_events": anomaly_events,
@@ -297,6 +331,7 @@ def show_branch_anomaly():
             "weekly_report": weekly_report,
             "classified_events": classified_events,
             "classified_watchlist": classified_watchlist,
+            "stock_opportunities": stock_opportunities,
         }
     else:
         cached_result = st.session_state.get(state_key)
@@ -308,6 +343,7 @@ def show_branch_anomaly():
         weekly_report = cached_result["weekly_report"]
         classified_events = cached_result["classified_events"]
         classified_watchlist = cached_result["classified_watchlist"]
+        stock_opportunities = cached_result["stock_opportunities"]
 
     st.success(f"完成：共彙整 {len(anomaly_events)} 個分點，追蹤名單 {len(watchlist)} 筆。")
     _render_summary_cards(anomaly_events, watchlist)
@@ -329,6 +365,7 @@ def show_branch_anomaly():
     filtered_events = filtered_events[filtered_events["event_days"] >= min_event_days]
 
     main_cols = [
+        "stock_id",
         "branch_id",
         "branch_name",
         "anomaly_score",
@@ -342,6 +379,7 @@ def show_branch_anomaly():
     ]
 
     detail_cols = [
+        "stock_id",
         "branch_id",
         "branch_name",
         "avg_score",
@@ -357,7 +395,41 @@ def show_branch_anomaly():
         "observed_days",
     ]
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["異常排行榜", "追蹤名單", "深度欄位", "每週摘要", "當沖分點"])
+    tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs(["可交易股票雷達", "異常排行榜", "追蹤名單", "深度欄位", "每週摘要", "當沖分點"])
+
+    with tab0:
+        st.caption("以全市場分點異常彙總每檔股票，快速找『偏多可留意』與『偏空主力賣壓』。")
+        if stock_opportunities.empty:
+            st.info("目前條件下沒有可判讀的股票機會。")
+        else:
+            bias_options = ["偏多（可留意買點）", "偏空（主力賣壓）", "中性"]
+            chosen_bias = st.multiselect("篩選股票方向", options=bias_options, default=bias_options[:2])
+            stock_table = stock_opportunities.copy()
+            if chosen_bias:
+                stock_table = stock_table[stock_table["bias"].isin(chosen_bias)]
+
+            st.dataframe(
+                _localize_table(stock_table.head(int(top_n))).rename(
+                    columns={
+                        "branch_count": "分點數",
+                        "active_branch_count": "活躍分點數",
+                        "total_event_days": "總異常事件天數",
+                        "avg_anomaly_score": "平均異常分數",
+                        "buy_signal_score": "偏多分數",
+                        "sell_signal_score": "偏空分數",
+                        "bias": "方向判讀",
+                    }
+                ).style.format(
+                    {
+                        "平均異常分數": "{:.2f}",
+                        "偏多分數": "{:.2f}",
+                        "偏空分數": "{:.2f}",
+                        "淨流向占比": "{:.2%}",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
     with tab1:
         st.caption("新增持有週期欄位：僅顯示長線持有或短線進出。")
