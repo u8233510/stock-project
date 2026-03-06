@@ -23,6 +23,7 @@ class AccumulationScanConfig:
     lookback_days: int = 60
     min_stability: float = 0.5
     coord_threshold: float = 0.5
+    final_score_threshold: int = 50
     anomaly_contamination: float = 0.05
     changepoint_penalty: int = 8
     changepoint_recent_days: int = 10
@@ -111,9 +112,6 @@ def run_accumulation_scan(raw_df: pd.DataFrame, cfg: AccumulationScanConfig) -> 
 
     final_candidates = []
     for stock_id, g in df.groupby("stock_id"):
-        if g["date"].nunique() < 20:
-            continue
-
         total_days = max(g["date"].nunique(), 1)
         stability = g.groupby("branch_id").apply(lambda x: (x["net_buy"] > 0).sum() / total_days)
         stability_score = float(stability.max()) if not stability.empty else 0.0
@@ -125,7 +123,7 @@ def run_accumulation_scan(raw_df: pd.DataFrame, cfg: AccumulationScanConfig) -> 
         cumulative_net = g.groupby("date")["net_buy"].sum().sort_index().cumsum()
         is_shifting = _detect_changepoint(cumulative_net, cfg.changepoint_penalty, cfg.changepoint_recent_days)
         has_anomaly = _detect_anomaly(g.sort_values("date"), cfg.anomaly_contamination)
-        coordination_score = _coordination_score(g, min_stability=0.4)
+        coordination_score = _coordination_score(g, min_stability=cfg.min_stability)
 
         final_score = 0
         if stability_score >= float(cfg.min_stability):
@@ -137,7 +135,7 @@ def run_accumulation_scan(raw_df: pd.DataFrame, cfg: AccumulationScanConfig) -> 
         if participant_diff < 0:
             final_score += 10
 
-        if final_score >= 50:
+        if final_score >= int(cfg.final_score_threshold):
             final_candidates.append(
                 {
                     "stock_id": stock_id,
