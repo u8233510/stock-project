@@ -181,6 +181,26 @@ TABLE_REGISTRY = {
             updated_at TEXT,
             PRIMARY KEY (date, securities_trader_id, api_name)
         );"""
+    ,
+    "stock_info": """
+        CREATE TABLE IF NOT EXISTS stock_info (
+            date TEXT NOT NULL,
+            stock_id TEXT NOT NULL,
+            stock_name TEXT,
+            type TEXT,
+            industry_category TEXT,
+            PRIMARY KEY (date, stock_id)
+        );""",
+    "stock_info_sync_log": """
+        CREATE TABLE IF NOT EXISTS stock_info_sync_log (
+            date TEXT NOT NULL,
+            api_name TEXT NOT NULL DEFAULT 'taiwan_stock_info_with_warrant',
+            row_count INTEGER DEFAULT 0,
+            status TEXT,
+            message TEXT,
+            updated_at TEXT,
+            PRIMARY KEY (date, api_name)
+        );"""
 }
 
 # 索引配置
@@ -201,6 +221,13 @@ INDEX_REGISTRY = {
     ],
     "securities_trader_info": [
         "CREATE INDEX IF NOT EXISTS idx_trader_info_name ON securities_trader_info(securities_trader);"
+    ],
+    "stock_info": [
+        "CREATE INDEX IF NOT EXISTS idx_stock_info_stock_date ON stock_info(stock_id, date);",
+        "CREATE INDEX IF NOT EXISTS idx_stock_info_industry ON stock_info(industry_category);"
+    ],
+    "stock_info_sync_log": [
+        "CREATE INDEX IF NOT EXISTS idx_stock_info_sync_status_date ON stock_info_sync_log(status, date);"
     ],
 }
 
@@ -285,6 +312,17 @@ def ensure_branch_sync_log_schema(conn):
     """確保 branch_sync_log 表存在（供分點明細同步任務使用）。"""
     conn.execute(TABLE_REGISTRY["branch_sync_log"])
     for idx in INDEX_REGISTRY.get("branch_sync_log", []):
+        conn.execute(idx)
+    conn.commit()
+
+
+def ensure_stock_info_sync_log_schema(conn):
+    """確保 stock_info / stock_info_sync_log 表存在（供股票資訊同步任務使用）。"""
+    conn.execute(TABLE_REGISTRY["stock_info"])
+    conn.execute(TABLE_REGISTRY["stock_info_sync_log"])
+    for idx in INDEX_REGISTRY.get("stock_info", []):
+        conn.execute(idx)
+    for idx in INDEX_REGISTRY.get("stock_info_sync_log", []):
         conn.execute(idx)
     conn.commit()
 
