@@ -20,7 +20,7 @@ COLUMN_LABELS = {
 }
 
 
-def _load_scan_raw(conn, sid: str, start_date: str, end_date: str) -> pd.DataFrame:
+def _load_scan_raw(conn, start_date: str, end_date: str) -> pd.DataFrame:
     sql = """
     SELECT
         b.stock_id,
@@ -30,43 +30,28 @@ def _load_scan_raw(conn, sid: str, start_date: str, end_date: str) -> pd.DataFra
         b.buy,
         b.sell,
         o.Trading_Volume
-    FROM branch_price_daily b
+    FROM branch_trader_daily_detail b
     JOIN stock_ohlcv_daily o
       ON o.stock_id = b.stock_id
      AND o.date = b.date
-    WHERE b.stock_id = ?
-      AND b.date BETWEEN ? AND ?
-    ORDER BY b.date ASC
+    WHERE b.date BETWEEN ? AND ?
+    ORDER BY b.stock_id ASC, b.securities_trader_id ASC, b.date ASC
     """
-    return pd.read_sql(sql, conn, params=(sid, start_date, end_date))
+    return pd.read_sql(sql, conn, params=(start_date, end_date))
 
 
 def show_branch_accumulation_scan():
     st.markdown("### 🕵️ 低檔潛伏分點掃描 (The Accumulation Scan)")
-    st.caption("獨立掃描器：尋找『連續買超、幾乎不賣、且吃下市場成交量』的神祕分點。")
+    st.caption("全市場掃描器：不用先選股票，直接找出『連續買超、幾乎不賣、且吃下成交量』的分點。")
 
     cfg = database.load_config()
     conn = database.get_db_connection(cfg)
 
-    universe = cfg.get("universe", [])
-    if not universe:
-        st.warning("config.json 未設定 universe。")
-        return
-
-    stock_options = {f"{s['stock_id']} {s['name']}": s['stock_id'] for s in universe}
-
-    c1, c2, c3 = st.columns([1.8, 2.0, 1.2])
-    with c1:
-        sid_label = st.selectbox("標的", list(stock_options.keys()), key="acc_scan_sid")
-        sid = stock_options[sid_label]
-
     bounds = conn.execute(
         """
         SELECT MIN(date), MAX(date)
-        FROM branch_price_daily
-        WHERE stock_id = ?
-        """,
-        (sid,),
+        FROM branch_trader_daily_detail
+        """
     ).fetchone()
 
     min_date_raw, max_date_raw = bounds if bounds else (None, None)
@@ -74,10 +59,11 @@ def show_branch_accumulation_scan():
     max_date = pd.to_datetime(max_date_raw).date() if max_date_raw else None
 
     if not min_date or not max_date:
-        st.info("此標的尚無分點資料。")
+        st.info("目前 branch_trader_daily_detail 尚無資料。")
         return
 
-    with c2:
+    c1, c2 = st.columns([2.2, 1.0])
+    with c1:
         date_range = st.date_input(
             "日期區間",
             value=[max(min_date, max_date - pd.Timedelta(days=120)), max_date],
@@ -85,9 +71,8 @@ def show_branch_accumulation_scan():
             max_value=max_date,
             key="acc_scan_date_range",
         )
-
-    with c3:
-        top_n = st.number_input("顯示筆數", min_value=10, max_value=200, value=50, step=10, key="acc_scan_top_n")
+    with c2:
+        top_n = st.number_input("顯示筆數", min_value=10, max_value=500, value=100, step=10, key="acc_scan_top_n")
 
     if not isinstance(date_range, (tuple, list)) or len(date_range) != 2:
         st.warning("請選擇開始與結束日期。")
@@ -95,19 +80,21 @@ def show_branch_accumulation_scan():
 
     start_d, end_d = date_range
 
-    c4, c5, c6 = st.columns(3)
+    c3, c4, c5 = st.columns(3)
+    with c3:
+        min_days = st.slider("連續買超天數", min_value=2, max_value=15, value=3, step=1, key="acc_scan_min_days")
     with c4:
-        min_days = st.slider("連續買超天數", min_value=3, max_value=10, value=3, step=1, key="acc_scan_min_days")
+        min_ratio = st.slider("最低買賣比", min_value=3.0, max_value=100.0, value=10.0, step=1.0, key="acc_scan_min_ratio")
     with c5:
-        min_ratio = st.slider("最低買賣比", min_value=10.0, max_value=50.0, value=10.0, step=1.0, key="acc_scan_min_ratio")
-    with c6:
-        min_share = st.slider("最低成交佔比", min_value=0.05, max_value=0.30, value=0.05, step=0.01, key="acc_scan_min_share")
+        min_share = st.slider("最低成交佔比", min_value=0.01, max_value=0.30, value=0.05, step=0.01, key="acc_scan_min_share")
 
-    run = st.button("執行低檔潛伏掃描", type="primary", use_container_width=True, key="acc_scan_run")
+    run = st.button("執行全市場低檔潛伏掃描", type="primary", use_container_width=True, key="acc_scan_run")
 
     state_key = "accumulation_scan_result"
     if run:
-        raw_df = _load_scan_raw(conn, sid, str(start_d), str(end_d))
+        with st.spinner("掃描中，請稍候..."):
+            raw_df = _load_scan_raw(conn, str(start_d), str(end_d))
+
         if raw_df.empty:
             st.info("選定區間內無可用資料。")
             st.session_state.pop(state_key, None)
@@ -122,6 +109,7 @@ def show_branch_accumulation_scan():
         st.session_state[state_key] = result_df
 
     if state_key not in st.session_state:
+        st.info("請先設定條件後，點擊「執行全市場低檔潛伏掃描」。")
         return
 
     result_df = st.session_state[state_key]
@@ -135,10 +123,11 @@ def show_branch_accumulation_scan():
     display_df["end_date"] = pd.to_datetime(display_df["end_date"]).dt.date
     display_df["latest_signal_end"] = pd.to_datetime(display_df["latest_signal_end"]).dt.date
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("符合條件分點數", f"{len(result_df)}")
-    c2.metric("最長連買天數", f"{int(result_df['consecutive_days'].max())}")
-    c3.metric("最高平均成交佔比", f"{result_df['avg_volume_share'].max():.2%}")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("符合條件分點-股票組合", f"{len(result_df)}")
+    c2.metric("涉及分點數", f"{result_df['branch_id'].nunique()}")
+    c3.metric("涉及股票數", f"{result_df['stock_id'].nunique()}")
+    c4.metric("最長連買天數", f"{int(result_df['consecutive_days'].max())}")
 
     formatters = {
         "連續買超天數": "{:.0f}",
