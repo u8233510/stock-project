@@ -93,7 +93,23 @@ def show_branch_accumulation_scan():
         score_threshold = st.slider("最低綜合分數(%)", min_value=0, max_value=100, value=50, step=5, key="acc_scan_score_threshold")
 
 
-    run = st.button("執行全市場低檔潛伏掃描", type="primary", use_container_width=True, key="acc_scan_run")
+    state_key = "accumulation_scan_result"
+    running_key = "acc_scan_running"
+    progress_key = "acc_scan_progress"
+    page_key = "acc_scan_page"
+
+    if running_key not in st.session_state:
+        st.session_state[running_key] = False
+    if progress_key not in st.session_state:
+        st.session_state[progress_key] = ""
+
+    run = st.button(
+        "執行全市場低檔潛伏掃描",
+        type="primary",
+        use_container_width=True,
+        key="acc_scan_run",
+        disabled=st.session_state[running_key],
+    )
 
     effective_lookback = min(int(lookback_days), int(available_days))
     if effective_lookback < int(lookback_days):
@@ -101,14 +117,19 @@ def show_branch_accumulation_scan():
             f"⚠️ 目前日期區間僅有 {available_days} 天資料，將自動以 {effective_lookback} 天進行掃描。"
         )
 
-    state_key = "accumulation_scan_result"
     if run:
-        with st.spinner("掃描中，請稍候..."):
-            raw_df = _load_scan_raw(conn, str(start_d), str(end_d))
+        st.session_state[running_key] = True
+        st.session_state[progress_key] = "讀取分點資料中..."
+        progress_bar = st.progress(0, text="掃描中，請稍候...")
+
+        raw_df = _load_scan_raw(conn, str(start_d), str(end_d))
+        progress_bar.progress(40, text="已完成資料讀取，開始計算模型...")
 
         if raw_df.empty:
             st.info("選定區間內無可用資料。")
             st.session_state.pop(state_key, None)
+            st.session_state[running_key] = False
+            st.session_state[progress_key] = ""
             return
 
         scan_cfg = AccumulationScanConfig(
@@ -118,7 +139,11 @@ def show_branch_accumulation_scan():
             final_score_threshold=int(score_threshold),
         )
         result_df = run_accumulation_scan(raw_df, scan_cfg)
+        progress_bar.progress(100, text="掃描完成")
         st.session_state[state_key] = result_df
+        st.session_state[running_key] = False
+        st.session_state[progress_key] = ""
+        st.session_state[page_key] = 1
 
     if state_key not in st.session_state:
         st.info("請先設定條件後，點擊「執行全市場低檔潛伏掃描」。")
@@ -131,6 +156,19 @@ def show_branch_accumulation_scan():
         return
 
     display_df = result_df.head(int(top_n)).copy()
+    page_size = 20
+    total_rows = len(display_df)
+    total_pages = max((total_rows - 1) // page_size + 1, 1)
+
+    if page_key not in st.session_state:
+        st.session_state[page_key] = 1
+    current_page = int(st.session_state[page_key])
+    current_page = min(max(current_page, 1), total_pages)
+    st.session_state[page_key] = current_page
+
+    page_start = (current_page - 1) * page_size
+    page_end = page_start + page_size
+    page_df = display_df.iloc[page_start:page_end].copy()
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("符合條件股票數", f"{len(result_df)}")
@@ -138,5 +176,17 @@ def show_branch_accumulation_scan():
     c3.metric("有結構轉強", f"{int(result_df['is_shifting'].sum())}")
     c4.metric("有異常訊號", f"{int(result_df['has_anomaly'].sum())}")
 
-    localized = display_df.rename(columns=COLUMN_LABELS)
+    p1, p2, p3 = st.columns([1, 1, 4])
+    with p1:
+        if st.button("上一頁", use_container_width=True, disabled=current_page <= 1):
+            st.session_state[page_key] = current_page - 1
+            st.rerun()
+    with p2:
+        if st.button("下一頁", use_container_width=True, disabled=current_page >= total_pages):
+            st.session_state[page_key] = current_page + 1
+            st.rerun()
+    with p3:
+        st.caption(f"第 {current_page} / {total_pages} 頁（每頁 {page_size} 筆，顯示 {total_rows} 筆）")
+
+    localized = page_df.rename(columns=COLUMN_LABELS)
     st.dataframe(localized, use_container_width=True, hide_index=True)
