@@ -180,8 +180,14 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
             (buy_trader_count - sell_trader_count) / total_trader_count if total_trader_count else 0.0
         )
 
-        top_buy = max(traders, key=lambda x: x[1].net_shares, default=None)
-        top_sell = min(traders, key=lambda x: x[1].net_shares, default=None)
+        top_buy_days = max(traders, key=lambda x: x[1].buy_days, default=None)
+        top_sell_days = max(traders, key=lambda x: x[1].sell_days, default=None)
+
+        top_buy_amount = max(
+            buy_positive,
+            key=lambda x: x[1].net_shares * x[1].avg_buy_price,
+            default=None,
+        )
 
         best_profit = None
         for tid, tagg in traders:
@@ -203,25 +209,31 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
             best_profit_value = 0.0
             best_profit_avg_sell = 0.0
 
-        if top_buy:
-            top_buy_tid, top_buy_agg = top_buy
+        if top_buy_days:
+            top_buy_tid, top_buy_agg = top_buy_days
+            top_buy_days_name = trader_name_map[(stock_id, top_buy_tid)]
+            top_buy_days_count = top_buy_agg.buy_days
+        else:
+            top_buy_days_name = ""
+            top_buy_days_count = 0
+
+        if top_buy_amount:
+            top_buy_tid, top_buy_agg = top_buy_amount
             top_buy_name = trader_name_map[(stock_id, top_buy_tid)]
-            top_buy_days = top_buy_agg.buy_days
-            top_buy_cost = max(top_buy_agg.net_shares, 0) * top_buy_agg.avg_buy_price
+            top_buy_cost = top_buy_agg.net_shares * top_buy_agg.avg_buy_price
             top_buy_avg_price = top_buy_agg.avg_buy_price
         else:
             top_buy_name = ""
-            top_buy_days = 0
             top_buy_cost = 0.0
             top_buy_avg_price = 0.0
 
-        if top_sell:
-            top_sell_tid, top_sell_agg = top_sell
+        if top_sell_days:
+            top_sell_tid, top_sell_agg = top_sell_days
             top_sell_name = trader_name_map[(stock_id, top_sell_tid)]
-            top_sell_days = top_sell_agg.sell_days
+            top_sell_days_count = top_sell_agg.sell_days
         else:
             top_sell_name = ""
-            top_sell_days = 0
+            top_sell_days_count = 0
 
         output.append(
             {
@@ -233,10 +245,10 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
                 "買超分點數": buy_trader_count,
                 "賣超分點數": sell_trader_count,
                 "籌碼集中度": round(concentration, 4),
-                "買最多分點名稱": top_buy_name,
-                "買超天數": top_buy_days,
+                "買最多分點名稱": top_buy_days_name,
+                "買超天數": top_buy_days_count,
                 "賣超最多分點名稱": top_sell_name,
-                "賣超天數": top_sell_days,
+                "賣超天數": top_sell_days_count,
                 "目前收盤價": round(latest_close_map.get(stock_id, 0.0), 2),
                 "平均買超價格": round(sagg.avg_buy_price, 2),
                 "平均賣超價格": round(sagg.avg_sell_price, 2),
