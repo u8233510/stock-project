@@ -201,6 +201,31 @@ TABLE_REGISTRY = {
             updated_at TEXT,
             PRIMARY KEY (date, api_name)
         );"""
+    ,
+    "stock_daily_trade_detail": """
+        CREATE TABLE IF NOT EXISTS stock_daily_trade_detail (
+            date TEXT NOT NULL,
+            stock_id TEXT NOT NULL,
+            Trading_Volume INTEGER,
+            Trading_money INTEGER,
+            open REAL,
+            max REAL,
+            min REAL,
+            close REAL,
+            spread REAL,
+            Trading_turnover INTEGER,
+            PRIMARY KEY (date, stock_id)
+        );""",
+    "stock_daily_trade_detail_sync_log": """
+        CREATE TABLE IF NOT EXISTS stock_daily_trade_detail_sync_log (
+            date TEXT NOT NULL,
+            api_name TEXT NOT NULL DEFAULT 'TaiwanStockPrice',
+            row_count INTEGER DEFAULT 0,
+            status TEXT,
+            message TEXT,
+            updated_at TEXT,
+            PRIMARY KEY (date, api_name)
+        );"""
 }
 
 # 索引配置
@@ -228,6 +253,12 @@ INDEX_REGISTRY = {
     ],
     "stock_info_sync_log": [
         "CREATE INDEX IF NOT EXISTS idx_stock_info_sync_status_date ON stock_info_sync_log(status, date);"
+    ],
+    "stock_daily_trade_detail": [
+        "CREATE INDEX IF NOT EXISTS idx_stock_daily_trade_detail_stock_date ON stock_daily_trade_detail(stock_id, date);"
+    ],
+    "stock_daily_trade_detail_sync_log": [
+        "CREATE INDEX IF NOT EXISTS idx_stock_daily_trade_detail_sync_status_date ON stock_daily_trade_detail_sync_log(status, date);"
     ],
 }
 
@@ -323,6 +354,17 @@ def ensure_stock_info_sync_log_schema(conn):
     for idx in INDEX_REGISTRY.get("stock_info", []):
         conn.execute(idx)
     for idx in INDEX_REGISTRY.get("stock_info_sync_log", []):
+        conn.execute(idx)
+    conn.commit()
+
+
+def ensure_stock_daily_trade_detail_schema(conn):
+    """確保每日交易明細與同步紀錄表存在。"""
+    conn.execute(TABLE_REGISTRY["stock_daily_trade_detail"])
+    conn.execute(TABLE_REGISTRY["stock_daily_trade_detail_sync_log"])
+    for idx in INDEX_REGISTRY.get("stock_daily_trade_detail", []):
+        conn.execute(idx)
+    for idx in INDEX_REGISTRY.get("stock_daily_trade_detail_sync_log", []):
         conn.execute(idx)
     conn.commit()
 

@@ -8,6 +8,7 @@ import ingest_manager
 import ingest_minute
 from utility.finmind_branch_collector import run_collection, refresh_trader_info
 from utility.finmind_stock_info_collector import refresh_stock_info
+from utility.finmind_stock_daily_trade_detail_sync import sync_stock_daily_trade_detail
 
 
 def _parse_iso_date(value: str | None, fallback: date) -> date:
@@ -58,6 +59,7 @@ def show_data_management():
             "⏱️ 分鐘與主動力度 (新 Ingest Minute)",
             "🏦 FinMind 分點基本資料下載",
             "🏦 FinMind 股票資訊同步",
+            "🏦 FinMind 每日交易明細同步",
             "🏦 FinMind 分點明細同步 (分點+日期)",
         ],
         horizontal=True,
@@ -235,6 +237,94 @@ def show_data_management():
             else:
                 st.success(f"完成：已下載/更新 {len(stock_info_df)} 筆股票資訊")
                 st.dataframe(stock_info_df.tail(500), use_container_width=True)
+
+    elif task_type == "🏦 FinMind 每日交易明細同步":
+        st.subheader("📋 案件：同步區間內每天交易明細（TaiwanStockPrice）")
+
+        default_db = (cfg.get("storage") or {}).get("sqlite_path", "data/stock.db")
+        ingest_cfg = cfg.get("ingest") or {}
+        default_end = _parse_iso_date((cfg.get("ingest_master") or {}).get("end_date"), date.today())
+        default_start = _parse_iso_date((cfg.get("ingest_master") or {}).get("start_date"), default_end - timedelta(days=7))
+        default_sleep = float(ingest_cfg.get("sleep_seconds", 0.3) or 0.3)
+        default_retry_notrade_days = int(ingest_cfg.get("retry_notrade_days", 14) or 14)
+
+        branch_sync_cfg = cfg.get("branch_sync") or {}
+        default_max_retries = int(branch_sync_cfg.get("max_retries", 2) or 2)
+        default_retry_sleep = float(branch_sync_cfg.get("retry_sleep_seconds", 1.0) or 1.0)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.caption("FinMind Token 由 config.json 的 finmind.api_token 自動帶入")
+            raw_dir = st.text_input("Raw 資料目錄", value="data/stock_price_raw", key="stock_daily_trade_detail_raw_dir")
+
+        with col2:
+            start_d = st.date_input("開始日期", value=default_start, key="stock_daily_trade_detail_start")
+            end_d = st.date_input("結束日期", value=default_end, key="stock_daily_trade_detail_end")
+            sqlite_path = st.text_input("SQLite 路徑", value=default_db, key="stock_daily_trade_detail_sqlite")
+            sleep_sec = st.number_input(
+                "每次呼叫間隔(秒)",
+                min_value=0.0,
+                max_value=5.0,
+                value=max(0.0, min(5.0, default_sleep)),
+                step=0.1,
+                key="stock_daily_trade_detail_sleep",
+            )
+            retry_notrade_days = st.number_input(
+                "NoTrade 重試天數（規則同 ingest_manager）",
+                min_value=0,
+                max_value=90,
+                value=max(0, min(90, default_retry_notrade_days)),
+                step=1,
+                key="stock_daily_trade_detail_retry_notrade_days",
+            )
+            max_retries = st.number_input(
+                "API 失敗重試次數",
+                min_value=0,
+                max_value=10,
+                value=max(0, min(10, default_max_retries)),
+                step=1,
+                key="stock_daily_trade_detail_retries",
+            )
+            retry_sleep_sec = st.number_input(
+                "API 重試等待(秒)",
+                min_value=0.0,
+                max_value=30.0,
+                value=max(0.0, min(30.0, default_retry_sleep)),
+                step=0.5,
+                key="stock_daily_trade_detail_retry_sleep",
+            )
+
+        if st.button("🚀 啟動每日交易明細同步", use_container_width=True):
+            if not finmind_token:
+                st.error("config.json 缺少 finmind.api_token，請先設定。")
+                return
+            if start_d > end_d:
+                st.error("開始日期不可晚於結束日期。")
+                return
+
+            progress = st.empty()
+            with st.spinner("每日交易明細同步中..."):
+                result_df = sync_stock_daily_trade_detail(
+                    token=finmind_token,
+                    sqlite_path=Path(sqlite_path) if sqlite_path.strip() else Path(default_db),
+                    start_date=start_d.isoformat(),
+                    end_date=end_d.isoformat(),
+                    raw_dir=Path(raw_dir),
+                    sleep_sec=float(sleep_sec),
+                    max_retries=int(max_retries),
+                    retry_sleep_sec=float(retry_sleep_sec),
+                    retry_notrade_days=int(retry_notrade_days),
+                    progress_callback=lambda msg: progress.info(msg),
+                )
+
+            if result_df.empty:
+                st.info("無待同步資料（可能都已同步完成）。")
+            else:
+                ok = int((result_df["status"] == "Success").sum())
+                no_trade = int((result_df["status"] == "NoTrade").sum())
+                err = int((result_df["status"] == "Failed").sum())
+                st.success(f"同步完成：成功 {ok} 天，NoTrade {no_trade} 天，失敗 {err} 天")
+                st.dataframe(result_df.tail(500), use_container_width=True)
 
     elif task_type == "🏦 FinMind 分點明細同步 (分點+日期)":
         st.subheader("📋 案件：依分點代碼 + 日期下載交易明細")
