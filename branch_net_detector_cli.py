@@ -58,6 +58,13 @@ class StockAgg:
         return (self.sell_amount / self.sell_shares) if self.sell_shares else 0.0
 
 
+def normalize_stock_id(value: object) -> str:
+    stock_id = str(value or "").strip()
+    if stock_id.isdigit() and len(stock_id) < 4:
+        return stock_id.zfill(4)
+    return stock_id
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="計算區間內所有股票分點買賣統計")
     parser.add_argument("--start", required=True, help="起始日期 YYYY-MM-DD")
@@ -102,7 +109,7 @@ def load_latest_close(conn: sqlite3.Connection, end: str) -> Dict[str, float]:
         GROUP BY stock_id
     ) m ON o.stock_id = m.stock_id AND o.date = m.max_date
     """
-    return {str(sid).strip(): float(close or 0.0) for sid, close in conn.execute(sql, (end,)).fetchall()}
+    return {normalize_stock_id(sid): float(close or 0.0) for sid, close in conn.execute(sql, (end,)).fetchall()}
 
 
 def load_latest_stock_name(conn: sqlite3.Connection) -> Dict[str, str]:
@@ -115,7 +122,7 @@ def load_latest_stock_name(conn: sqlite3.Connection) -> Dict[str, str]:
         GROUP BY stock_id
     ) m ON s.stock_id = m.stock_id AND s.date = m.max_date
     """
-    return {str(sid).strip(): str(name).strip() for sid, name in conn.execute(sql).fetchall()}
+    return {normalize_stock_id(sid): str(name).strip() for sid, name in conn.execute(sql).fetchall()}
 
 
 def load_volume_metrics(conn: sqlite3.Connection, start: str, end: str) -> Dict[str, dict]:
@@ -161,7 +168,7 @@ def load_volume_metrics(conn: sqlite3.Connection, start: str, end: str) -> Dict[
 
     metrics: Dict[str, dict] = {}
     for sid, latest_v, interval_avg_v, recent3_v, recent5_v in conn.execute(sql, (end, start, end)).fetchall():
-        stock_id = str(sid).strip()
+        stock_id = normalize_stock_id(sid)
         metrics[stock_id] = {
             "latest_volume": int(round(float(latest_v or 0))),
             "interval_avg_volume": float(interval_avg_v or 0),
@@ -183,7 +190,7 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
 
     for r in rows:
         date = str(r[0])
-        stock_id = str(r[1]).strip()
+        stock_id = normalize_stock_id(r[1])
         trader_id = str(r[2])
         trader_name = str(r[3])
         price = float(r[4] or 0.0)
