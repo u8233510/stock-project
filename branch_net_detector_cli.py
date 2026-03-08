@@ -100,14 +100,14 @@ def load_branch_rows(conn: sqlite3.Connection, start: str, end: str) -> Iterable
 
 def load_latest_close(conn: sqlite3.Connection, end: str) -> Dict[str, float]:
     sql = """
-    SELECT o.stock_id, o.close
-    FROM stock_ohlcv_daily o
+    SELECT d.stock_id, d.close
+    FROM stock_daily_trade_detail d
     JOIN (
         SELECT stock_id, MAX(date) AS max_date
-        FROM stock_ohlcv_daily
+        FROM stock_daily_trade_detail
         WHERE date <= ?
         GROUP BY stock_id
-    ) m ON o.stock_id = m.stock_id AND o.date = m.max_date
+    ) m ON d.stock_id = m.stock_id AND d.date = m.max_date
     """
     return {normalize_stock_id(sid): float(close or 0.0) for sid, close in conn.execute(sql, (end,)).fetchall()}
 
@@ -129,26 +129,26 @@ def load_volume_metrics(conn: sqlite3.Connection, start: str, end: str) -> Dict[
     sql = """
     WITH latest_day AS (
         SELECT stock_id, MAX(date) AS latest_date
-        FROM stock_ohlcv_daily
+        FROM stock_daily_trade_detail
         WHERE date <= ?
         GROUP BY stock_id
     ),
     interval_avg AS (
         SELECT stock_id, AVG(COALESCE(Trading_Volume, 0)) AS interval_avg_volume
-        FROM stock_ohlcv_daily
+        FROM stock_daily_trade_detail
         WHERE date BETWEEN ? AND ?
         GROUP BY stock_id
     ),
     latest_window AS (
         SELECT
-            o.stock_id,
-            o.date,
-            COALESCE(o.Trading_Volume, 0) AS volume,
-            ROW_NUMBER() OVER (PARTITION BY o.stock_id ORDER BY o.date DESC) AS rn
-        FROM stock_ohlcv_daily o
+            d.stock_id,
+            d.date,
+            COALESCE(d.Trading_Volume, 0) AS volume,
+            ROW_NUMBER() OVER (PARTITION BY d.stock_id ORDER BY d.date DESC) AS rn
+        FROM stock_daily_trade_detail d
         JOIN latest_day ld
-            ON ld.stock_id = o.stock_id
-           AND o.date <= ld.latest_date
+            ON ld.stock_id = d.stock_id
+           AND d.date <= ld.latest_date
     )
     SELECT
         ld.stock_id,
