@@ -1,8 +1,23 @@
-import subprocess
-import sys
+import csv
+import sqlite3
+from io import StringIO
+from pathlib import Path
 from datetime import date
 
 import streamlit as st
+
+from branch_net_detector_cli import build_summary
+
+
+def _rows_to_csv_bytes(rows: list[dict]) -> bytes:
+    if not rows:
+        return b""
+
+    output = StringIO()
+    writer = csv.DictWriter(output, fieldnames=list(rows[0].keys()))
+    writer.writeheader()
+    writer.writerows(rows)
+    return output.getvalue().encode("utf-8-sig")
 
 
 def show_branch_net_detector_entry() -> None:
@@ -13,37 +28,37 @@ def show_branch_net_detector_entry() -> None:
     start_date = st.date_input("起始日期", value=today)
     end_date = st.date_input("結束日期", value=today)
     db_path = st.text_input("SQLite 路徑", value="data/stock.db")
-    output_path = st.text_input("輸出 CSV 路徑", value="output/branch_interval_summary.csv")
+    output_filename = st.text_input("下載檔名", value="branch_interval_summary.csv")
 
     if st.button("執行分點買賣超偵測", type="primary"):
         if start_date > end_date:
             st.error("起始日期不可晚於結束日期")
             return
 
-        cmd = [
-            sys.executable,
-            "branch_net_detector_cli.py",
-            "--start",
-            start_date.isoformat(),
-            "--end",
-            end_date.isoformat(),
-            "--db-path",
-            db_path,
-            "--output",
-            output_path,
-        ]
-
         with st.spinner("執行中，請稍候..."):
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            db_file = Path(db_path)
+            if not db_file.exists():
+                st.error(f"找不到資料庫: {db_file}")
+                return
 
-        st.code(" ".join(cmd), language="bash")
-        if result.returncode == 0:
-            st.success("執行完成")
-            if result.stdout.strip():
-                st.text(result.stdout.strip())
-        else:
-            st.error("執行失敗")
-            if result.stdout.strip():
-                st.text(result.stdout.strip())
-            if result.stderr.strip():
-                st.text(result.stderr.strip())
+            conn = sqlite3.connect(str(db_file))
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = build_summary(conn, start_date.isoformat(), end_date.isoformat())
+            finally:
+                conn.close()
+
+        if not rows:
+            st.warning("指定區間查無 branch_trader_daily_detail 資料。")
+            return
+
+        st.success(f"查詢完成，共 {len(rows)} 檔股票。")
+        st.dataframe(rows, use_container_width=True)
+
+        csv_bytes = _rows_to_csv_bytes(rows)
+        st.download_button(
+            "下載 CSV",
+            data=csv_bytes,
+            file_name=Path(output_filename).name or "branch_interval_summary.csv",
+            mime="text/csv",
+        )
