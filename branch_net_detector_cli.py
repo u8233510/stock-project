@@ -102,21 +102,73 @@ def load_latest_close(conn: sqlite3.Connection, end: str) -> Dict[str, float]:
         GROUP BY stock_id
     ) m ON o.stock_id = m.stock_id AND o.date = m.max_date
     """
-    return {sid: float(close or 0.0) for sid, close in conn.execute(sql, (end,)).fetchall()}
+    return {str(sid).strip(): float(close or 0.0) for sid, close in conn.execute(sql, (end,)).fetchall()}
 
 
-def load_latest_stock_name(conn: sqlite3.Connection, end: str) -> Dict[str, str]:
+def load_latest_stock_name(conn: sqlite3.Connection) -> Dict[str, str]:
     sql = """
     SELECT s.stock_id, COALESCE(s.stock_name, s.stock_id)
     FROM stock_info s
     JOIN (
         SELECT stock_id, MAX(date) AS max_date
         FROM stock_info
-        WHERE date <= ?
         GROUP BY stock_id
     ) m ON s.stock_id = m.stock_id AND s.date = m.max_date
     """
-    return {sid: name for sid, name in conn.execute(sql, (end,)).fetchall()}
+    return {str(sid).strip(): str(name).strip() for sid, name in conn.execute(sql).fetchall()}
+
+
+def load_volume_metrics(conn: sqlite3.Connection, start: str, end: str) -> Dict[str, dict]:
+    sql = """
+    WITH latest_day AS (
+        SELECT stock_id, MAX(date) AS latest_date
+        FROM stock_ohlcv_daily
+        WHERE date <= ?
+        GROUP BY stock_id
+    ),
+    interval_avg AS (
+        SELECT stock_id, AVG(COALESCE(Trading_Volume, 0)) AS interval_avg_volume
+        FROM stock_ohlcv_daily
+        WHERE date BETWEEN ? AND ?
+        GROUP BY stock_id
+    ),
+    latest_window AS (
+        SELECT
+            o.stock_id,
+            o.date,
+            COALESCE(o.Trading_Volume, 0) AS volume,
+            ROW_NUMBER() OVER (PARTITION BY o.stock_id ORDER BY o.date DESC) AS rn
+        FROM stock_ohlcv_daily o
+        JOIN latest_day ld
+            ON ld.stock_id = o.stock_id
+           AND o.date <= ld.latest_date
+    )
+    SELECT
+        ld.stock_id,
+        COALESCE(latest.volume, 0) AS latest_volume,
+        COALESCE(ia.interval_avg_volume, 0) AS interval_avg_volume,
+        COALESCE(AVG(CASE WHEN lw.rn <= 3 THEN lw.volume END), 0) AS recent_3d_avg_volume,
+        COALESCE(AVG(CASE WHEN lw.rn <= 5 THEN lw.volume END), 0) AS recent_5d_avg_volume
+    FROM latest_day ld
+    LEFT JOIN latest_window latest
+        ON latest.stock_id = ld.stock_id AND latest.rn = 1
+    LEFT JOIN interval_avg ia
+        ON ia.stock_id = ld.stock_id
+    LEFT JOIN latest_window lw
+        ON lw.stock_id = ld.stock_id
+    GROUP BY ld.stock_id, latest.volume, ia.interval_avg_volume
+    """
+
+    metrics: Dict[str, dict] = {}
+    for sid, latest_v, interval_avg_v, recent3_v, recent5_v in conn.execute(sql, (end, start, end)).fetchall():
+        stock_id = str(sid).strip()
+        metrics[stock_id] = {
+            "latest_volume": int(round(float(latest_v or 0))),
+            "interval_avg_volume": float(interval_avg_v or 0),
+            "recent_3d_avg_volume": float(recent3_v or 0),
+            "recent_5d_avg_volume": float(recent5_v or 0),
+        }
+    return metrics
 
 
 def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
@@ -131,7 +183,7 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
 
     for r in rows:
         date = str(r[0])
-        stock_id = str(r[1])
+        stock_id = str(r[1]).strip()
         trader_id = str(r[2])
         trader_name = str(r[3])
         price = float(r[4] or 0.0)
@@ -162,7 +214,8 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
             tagg.sell_days += 1
 
     latest_close_map = load_latest_close(conn, end)
-    stock_name_map = load_latest_stock_name(conn, end)
+    stock_name_map = load_latest_stock_name(conn)
+    volume_metrics = load_volume_metrics(conn, start, end)
 
     stock_to_traders: Dict[str, List[Tuple[str, TraderAgg]]] = defaultdict(list)
     for (stock_id, trader_id), tagg in trader_agg.items():
@@ -183,10 +236,17 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
         top_buy_days = max(traders, key=lambda x: x[1].buy_days, default=None)
         top_sell_days = max(traders, key=lambda x: x[1].sell_days, default=None)
 
-        top_buy_amount = max(
-            buy_positive,
-            key=lambda x: x[1].net_shares * x[1].avg_buy_price,
-            default=None,
+        top_buy_amount = max(buy_positive, key=lambda x: x[1].buy_amount, default=None)
+
+        buy_positive_total_shares = sum(tagg.buy_shares for _, tagg in buy_positive)
+        buy_positive_total_amount = sum(tagg.buy_amount for _, tagg in buy_positive)
+        sell_negative_total_shares = sum(tagg.sell_shares for _, tagg in sell_negative)
+        sell_negative_total_amount = sum(tagg.sell_amount for _, tagg in sell_negative)
+        avg_buy_price = (
+            buy_positive_total_amount / buy_positive_total_shares if buy_positive_total_shares else 0.0
+        )
+        avg_sell_price = (
+            sell_negative_total_amount / sell_negative_total_shares if sell_negative_total_shares else 0.0
         )
 
         best_profit = None
@@ -235,13 +295,16 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
             top_sell_name = ""
             top_sell_days_count = 0
 
+        vol = volume_metrics.get(stock_id, {})
+
         output.append(
             {
                 "股票代號": stock_id,
                 "股票名稱": stock_name_map.get(stock_id, stock_id),
-                "買(張數)": sagg.buy_shares,
-                "賣(張數)": sagg.sell_shares,
-                "買賣超": sagg.net_shares,
+                "最新成交量": int(vol.get("latest_volume", 0)),
+                "區間平均成交量": round(vol.get("interval_avg_volume", 0.0), 2),
+                "最近三日平均成交量": round(vol.get("recent_3d_avg_volume", 0.0), 2),
+                "最近五日平均成交量": round(vol.get("recent_5d_avg_volume", 0.0), 2),
                 "買超分點數": buy_trader_count,
                 "賣超分點數": sell_trader_count,
                 "籌碼集中度": round(concentration, 4),
@@ -250,8 +313,8 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
                 "賣超最多分點名稱": top_sell_name,
                 "賣超天數": top_sell_days_count,
                 "目前收盤價": round(latest_close_map.get(stock_id, 0.0), 2),
-                "平均買超價格": round(sagg.avg_buy_price, 2),
-                "平均賣超價格": round(sagg.avg_sell_price, 2),
+                "平均買超價格": round(avg_buy_price, 2),
+                "平均賣超價格": round(avg_sell_price, 2),
                 "獲利最高分點": best_profit_name,
                 "獲利最高分點獲利金額": round(best_profit_value, 2),
                 "獲利最高分點平均賣價": round(best_profit_avg_sell, 2),
@@ -274,9 +337,10 @@ def write_csv(rows: List[dict], output_path: str) -> None:
     fieldnames = [
         "股票代號",
         "股票名稱",
-        "買(張數)",
-        "賣(張數)",
-        "買賣超",
+        "最新成交量",
+        "區間平均成交量",
+        "最近三日平均成交量",
+        "最近五日平均成交量",
         "買超分點數",
         "賣超分點數",
         "籌碼集中度",
