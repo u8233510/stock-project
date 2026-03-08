@@ -50,11 +50,6 @@ class StockAgg:
         return self.buy_shares - self.sell_shares
 
     @property
-    def concentration(self) -> float:
-        total = self.buy_shares + self.sell_shares
-        return (self.net_shares / total * 100.0) if total else 0.0
-
-    @property
     def avg_buy_price(self) -> float:
         return (self.buy_amount / self.buy_shares) if self.buy_shares else 0.0
 
@@ -90,7 +85,7 @@ def load_branch_rows(conn: sqlite3.Connection, start: str, end: str) -> Iterable
         COALESCE(price, 0) AS price,
         COALESCE(buy, 0) AS buy,
         COALESCE(sell, 0) AS sell
-    FROM branch_price_daily
+    FROM branch_trader_daily_detail
     WHERE date BETWEEN ? AND ?
     """
     return conn.execute(sql, (start, end)).fetchall()
@@ -178,6 +173,12 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
         traders = stock_to_traders.get(stock_id, [])
         buy_positive = [x for x in traders if x[1].net_shares > 0]
         sell_negative = [x for x in traders if x[1].net_shares < 0]
+        buy_trader_count = len(buy_positive)
+        sell_trader_count = len(sell_negative)
+        total_trader_count = buy_trader_count + sell_trader_count
+        concentration = (
+            (buy_trader_count - sell_trader_count) / total_trader_count if total_trader_count else 0.0
+        )
 
         top_buy = max(traders, key=lambda x: x[1].net_shares, default=None)
         top_sell = min(traders, key=lambda x: x[1].net_shares, default=None)
@@ -229,9 +230,9 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
                 "買(張數)": sagg.buy_shares,
                 "賣(張數)": sagg.sell_shares,
                 "買賣超": sagg.net_shares,
-                "買超分點數": len(buy_positive),
-                "賣超分點數": len(sell_negative),
-                "籌碼集中度": round(sagg.concentration, 2),
+                "買超分點數": buy_trader_count,
+                "賣超分點數": sell_trader_count,
+                "籌碼集中度": round(concentration, 4),
                 "買最多分點名稱": top_buy_name,
                 "買超天數": top_buy_days,
                 "賣超最多分點名稱": top_sell_name,
@@ -302,7 +303,7 @@ def main() -> int:
         conn.close()
 
     if not result:
-        print("指定區間查無 branch_price_daily 資料。")
+        print("指定區間查無 branch_trader_daily_detail 資料。")
         return 0
 
     write_csv(result, args.output)
