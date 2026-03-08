@@ -21,16 +21,16 @@ class BranchNetDetectorCLITest(unittest.TestCase):
                 sell INTEGER
             );
 
-            CREATE TABLE stock_ohlcv_daily (
+            CREATE TABLE stock_daily_trade_detail (
                 date TEXT,
-                stock_id INTEGER,
+                stock_id TEXT,
                 close REAL,
                 Trading_Volume INTEGER
             );
 
             CREATE TABLE stock_info (
                 date TEXT,
-                stock_id INTEGER,
+                stock_id TEXT,
                 stock_name TEXT
             );
             """
@@ -44,15 +44,15 @@ class BranchNetDetectorCLITest(unittest.TestCase):
             """
         )
         conn.executemany(
-            "INSERT INTO stock_ohlcv_daily (date, stock_id, close, Trading_Volume) VALUES (?, ?, ?, ?)",
+            "INSERT INTO stock_daily_trade_detail (date, stock_id, close, Trading_Volume) VALUES (?, ?, ?, ?)",
             [
-                ("2024-01-03", 50, 101.5, 1000),
-                ("2024-01-04", 50, 102.0, 2000),
-                ("2024-01-05", 50, 103.0, 3000),
+                ("2024-01-03", "0050", 101.5, 1000),
+                ("2024-01-04", "0050", 102.0, 2000),
+                ("2024-01-05", "0050", 103.0, 3000),
             ],
         )
         conn.execute(
-            "INSERT INTO stock_info (date, stock_id, stock_name) VALUES ('2024-01-05', 50, '元大台灣50')"
+            "INSERT INTO stock_info (date, stock_id, stock_name) VALUES ('2024-01-05', '0050', '元大台灣50')"
         )
         conn.commit()
 
