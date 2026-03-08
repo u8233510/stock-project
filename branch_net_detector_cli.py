@@ -49,14 +49,6 @@ class StockAgg:
     def net_shares(self) -> int:
         return self.buy_shares - self.sell_shares
 
-    @property
-    def avg_buy_price(self) -> float:
-        return (self.buy_amount / self.buy_shares) if self.buy_shares else 0.0
-
-    @property
-    def avg_sell_price(self) -> float:
-        return (self.sell_amount / self.sell_shares) if self.sell_shares else 0.0
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="計算區間內所有股票分點買賣統計")
@@ -91,32 +83,70 @@ def load_branch_rows(conn: sqlite3.Connection, start: str, end: str) -> Iterable
     return conn.execute(sql, (start, end)).fetchall()
 
 
-def load_latest_close(conn: sqlite3.Connection, end: str) -> Dict[str, float]:
+def load_latest_close(conn: sqlite3.Connection) -> Dict[str, float]:
     sql = """
     SELECT o.stock_id, o.close
     FROM stock_ohlcv_daily o
     JOIN (
         SELECT stock_id, MAX(date) AS max_date
         FROM stock_ohlcv_daily
-        WHERE date <= ?
         GROUP BY stock_id
     ) m ON o.stock_id = m.stock_id AND o.date = m.max_date
     """
-    return {sid: float(close or 0.0) for sid, close in conn.execute(sql, (end,)).fetchall()}
+    return {sid: float(close or 0.0) for sid, close in conn.execute(sql).fetchall()}
 
 
-def load_latest_stock_name(conn: sqlite3.Connection, end: str) -> Dict[str, str]:
+def load_latest_stock_name(conn: sqlite3.Connection) -> Dict[str, str]:
     sql = """
     SELECT s.stock_id, COALESCE(s.stock_name, s.stock_id)
     FROM stock_info s
     JOIN (
         SELECT stock_id, MAX(date) AS max_date
         FROM stock_info
-        WHERE date <= ?
         GROUP BY stock_id
     ) m ON s.stock_id = m.stock_id AND s.date = m.max_date
     """
-    return {sid: name for sid, name in conn.execute(sql, (end,)).fetchall()}
+    return {sid: name for sid, name in conn.execute(sql).fetchall()}
+
+
+def load_volume_metrics(conn: sqlite3.Connection, start: str, end: str) -> Dict[str, dict]:
+    latest_sql = """
+    SELECT o.stock_id, COALESCE(o.Trading_Volume, 0) AS latest_volume
+    FROM stock_ohlcv_daily o
+    JOIN (
+        SELECT stock_id, MAX(date) AS max_date
+        FROM stock_ohlcv_daily
+        GROUP BY stock_id
+    ) m ON o.stock_id = m.stock_id AND o.date = m.max_date
+    """
+    interval_sql = """
+    SELECT stock_id, AVG(COALESCE(Trading_Volume, 0)) AS interval_avg_volume
+    FROM stock_ohlcv_daily
+    WHERE date BETWEEN ? AND ?
+    GROUP BY stock_id
+    """
+    recent3_sql = """
+    WITH ranked AS (
+        SELECT
+            stock_id,
+            COALESCE(Trading_Volume, 0) AS Trading_Volume,
+            ROW_NUMBER() OVER (PARTITION BY stock_id ORDER BY date DESC) AS rn
+        FROM stock_ohlcv_daily
+    )
+    SELECT stock_id, AVG(Trading_Volume) AS recent3_avg_volume
+    FROM ranked
+    WHERE rn <= 3
+    GROUP BY stock_id
+    """
+
+    metrics: Dict[str, dict] = defaultdict(dict)
+    for sid, latest_volume in conn.execute(latest_sql).fetchall():
+        metrics[sid]["latest_volume"] = float(latest_volume or 0.0)
+    for sid, interval_avg_volume in conn.execute(interval_sql, (start, end)).fetchall():
+        metrics[sid]["interval_avg_volume"] = float(interval_avg_volume or 0.0)
+    for sid, recent3_avg_volume in conn.execute(recent3_sql).fetchall():
+        metrics[sid]["recent3_avg_volume"] = float(recent3_avg_volume or 0.0)
+    return metrics
 
 
 def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
@@ -161,8 +191,9 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
         elif day_net < 0:
             tagg.sell_days += 1
 
-    latest_close_map = load_latest_close(conn, end)
-    stock_name_map = load_latest_stock_name(conn, end)
+    latest_close_map = load_latest_close(conn)
+    stock_name_map = load_latest_stock_name(conn)
+    volume_metrics = load_volume_metrics(conn, start, end)
 
     stock_to_traders: Dict[str, List[Tuple[str, TraderAgg]]] = defaultdict(list)
     for (stock_id, trader_id), tagg in trader_agg.items():
@@ -223,13 +254,22 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
             top_sell_name = ""
             top_sell_days = 0
 
+        buy_super_amount = sum(tagg.buy_amount for _, tagg in buy_positive)
+        buy_super_shares = sum(tagg.buy_shares for _, tagg in buy_positive)
+        sell_super_amount = sum(tagg.sell_amount for _, tagg in sell_negative)
+        sell_super_shares = sum(tagg.sell_shares for _, tagg in sell_negative)
+        avg_buy_super_price = (buy_super_amount / buy_super_shares) if buy_super_shares else 0.0
+        avg_sell_super_price = (sell_super_amount / sell_super_shares) if sell_super_shares else 0.0
+
+        vol = volume_metrics.get(stock_id, {})
+
         output.append(
             {
                 "股票代號": stock_id,
                 "股票名稱": stock_name_map.get(stock_id, stock_id),
-                "買(張數)": sagg.buy_shares,
-                "賣(張數)": sagg.sell_shares,
-                "買賣超": sagg.net_shares,
+                "最新成交量": round(vol.get("latest_volume", 0.0), 2),
+                "區間平均成交量": round(vol.get("interval_avg_volume", 0.0), 2),
+                "最近三日平均成交量": round(vol.get("recent3_avg_volume", 0.0), 2),
                 "買超分點數": buy_trader_count,
                 "賣超分點數": sell_trader_count,
                 "籌碼集中度": round(concentration, 4),
@@ -238,8 +278,8 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
                 "賣超最多分點名稱": top_sell_name,
                 "賣超天數": top_sell_days,
                 "目前收盤價": round(latest_close_map.get(stock_id, 0.0), 2),
-                "平均買超價格": round(sagg.avg_buy_price, 2),
-                "平均賣超價格": round(sagg.avg_sell_price, 2),
+                "平均買超價格": round(avg_buy_super_price, 2),
+                "平均賣超價格": round(avg_sell_super_price, 2),
                 "獲利最高分點": best_profit_name,
                 "獲利最高分點獲利金額": round(best_profit_value, 2),
                 "獲利最高分點平均賣價": round(best_profit_avg_sell, 2),
@@ -262,9 +302,9 @@ def write_csv(rows: List[dict], output_path: str) -> None:
     fieldnames = [
         "股票代號",
         "股票名稱",
-        "買(張數)",
-        "賣(張數)",
-        "買賣超",
+        "最新成交量",
+        "區間平均成交量",
+        "最近三日平均成交量",
         "買超分點數",
         "賣超分點數",
         "籌碼集中度",
