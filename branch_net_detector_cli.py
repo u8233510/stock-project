@@ -189,24 +189,38 @@ def load_interval_volume_trend(conn: sqlite3.Connection, start: str, end: str) -
     ORDER BY stock_id, date
     """
 
+    def ema(values: List[float], span: int) -> float:
+        if not values:
+            return 0.0
+        alpha = 2.0 / (span + 1)
+        current = values[0]
+        for value in values[1:]:
+            current = alpha * value + (1 - alpha) * current
+        return current
+
     series_map: Dict[str, List[float]] = defaultdict(list)
     for sid, _date, volume in conn.execute(sql, (start, end)).fetchall():
         series_map[normalize_stock_id(sid)].append(float(volume or 0.0))
 
     trend_map: Dict[str, str] = {}
     for stock_id, volumes in series_map.items():
-        if len(volumes) < 3:
+        if len(volumes) < 5:
             trend_map[stock_id] = "觀察不出來"
             continue
 
-        diffs = [volumes[i + 1] - volumes[i] for i in range(len(volumes) - 1)]
-        up_count = sum(1 for d in diffs if d > 0)
-        down_count = sum(1 for d in diffs if d < 0)
-        total_steps = len(diffs)
+        short_ema = ema(volumes, span=3)
+        long_ema = ema(volumes, span=7)
+        if long_ema == 0:
+            trend_map[stock_id] = "觀察不出來"
+            continue
 
-        if up_count / total_steps >= 0.7 and volumes[-1] > volumes[0]:
+        momentum = (short_ema - long_ema) / long_ema
+        first = volumes[0]
+        roc = ((volumes[-1] - first) / first) if first > 0 else 0.0
+
+        if momentum >= 0.08 and roc >= 0.1:
             trend_map[stock_id] = "逐漸變大"
-        elif down_count / total_steps >= 0.7 and volumes[-1] < volumes[0]:
+        elif momentum <= -0.08 and roc <= -0.1:
             trend_map[stock_id] = "逐漸變小"
         else:
             trend_map[stock_id] = "觀察不出來"
