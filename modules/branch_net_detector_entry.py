@@ -6,7 +6,7 @@ from datetime import date
 
 import streamlit as st
 
-from branch_net_detector_cli import FIELDNAMES, build_summary, format_rows_for_output
+from branch_net_detector_cli import FIELDNAMES, build_summary, count_branch_rows, format_rows_for_output
 
 
 def _rows_to_csv_bytes(rows: list[dict]) -> bytes:
@@ -35,23 +35,45 @@ def show_branch_net_detector_entry() -> None:
             st.error("起始日期不可晚於結束日期")
             return
 
-        with st.spinner("執行中，請稍候..."):
-            db_file = Path(db_path)
-            if not db_file.exists():
-                st.error(f"找不到資料庫: {db_file}")
+        db_file = Path(db_path)
+        if not db_file.exists():
+            st.error(f"找不到資料庫: {db_file}")
+            return
+
+        progress = st.progress(0, text="準備執行...")
+        status_placeholder = st.empty()
+
+        conn = sqlite3.connect(str(db_file))
+        conn.row_factory = sqlite3.Row
+        try:
+            total_rows = count_branch_rows(conn, start_date.isoformat(), end_date.isoformat())
+            if total_rows <= 0:
+                progress.progress(100, text="完成")
+                st.warning("指定區間查無 branch_trader_daily_detail 資料。")
                 return
 
-            conn = sqlite3.connect(str(db_file))
-            conn.row_factory = sqlite3.Row
-            try:
-                rows = build_summary(conn, start_date.isoformat(), end_date.isoformat())
-            finally:
-                conn.close()
+            progress.progress(1, text="已連線資料庫")
+            status_placeholder.caption(f"本次要處理 {total_rows:,} 筆分點明細，請稍候。")
+
+            def _on_progress(ratio: float, message: str) -> None:
+                pct = max(0, min(100, int(ratio * 100)))
+                progress.progress(pct, text=message)
+
+            rows = build_summary(
+                conn,
+                start_date.isoformat(),
+                end_date.isoformat(),
+                progress_callback=_on_progress,
+            )
+        finally:
+            conn.close()
 
         if not rows:
             st.warning("指定區間查無 branch_trader_daily_detail 資料。")
             return
 
+        progress.progress(100, text="完成")
+        status_placeholder.caption("完成，可下載結果或直接在下方瀏覽資料表。")
         st.success(f"查詢完成，共 {len(rows)} 檔股票。")
         st.dataframe(format_rows_for_output(rows), use_container_width=True)
 
