@@ -16,6 +16,46 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
 
+FIELDNAMES = [
+    "股票代號",
+    "股票名稱",
+    "最新成交量",
+    "區間平均成交量",
+    "最近三日平均成交量",
+    "最近五日平均成交量",
+    "區間成交量趨勢",
+    "目前收盤價",
+    "平均買超價格",
+    "平均賣超價格",
+    "買超分點數",
+    "賣超分點數",
+    "籌碼集中度",
+    "總交易筆數",
+    "買筆數最多分點",
+    "買筆數",
+    "賣筆數最多分點",
+    "賣筆數",
+    "BDCV",
+    "買最多分點名稱",
+    "買超天數",
+    "買超最高分點",
+    "買超最高分點買超成本",
+    "買超最高分點平均買超價格",
+    "買超張數最多的分點",
+    "買超張數",
+    "買超張數區間成交量佔比",
+    "SDCV",
+    "賣超最多分點名稱",
+    "賣超天數",
+    "獲利最高分點",
+    "獲利最高分點獲利金額",
+    "獲利最高分點平均賣價",
+    "賣超張數最多的分點",
+    "賣超張數",
+    "賣超張數區間成交量佔比",
+]
+
+
 @dataclass
 class TraderAgg:
     buy_shares: int = 0
@@ -309,8 +349,17 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
         top_buy_trade_count = max(traders, key=lambda x: x[1].buy_trade_count, default=None)
         top_sell_trade_count = max(traders, key=lambda x: x[1].sell_trade_count, default=None)
 
-        top_buy_amount = max(buy_positive, key=lambda x: x[1].net_shares, default=None)
+        top_buy_days = max(traders, key=lambda x: x[1].buy_days, default=None)
+        top_sell_days = max(traders, key=lambda x: x[1].sell_days, default=None)
+
+        top_buy_amount = max(
+            buy_positive,
+            key=lambda x: x[1].net_shares * x[1].avg_buy_price,
+            default=None,
+        )
         top_sell_amount = min(sell_negative, key=lambda x: x[1].net_shares, default=None)
+        top_buy_shares = max(buy_positive, key=lambda x: x[1].net_shares, default=None)
+        top_sell_shares = min(sell_negative, key=lambda x: x[1].net_shares, default=None)
 
         buy_positive_total_shares = sum(tagg.buy_shares for _, tagg in buy_positive)
         buy_positive_total_amount = sum(tagg.buy_amount for _, tagg in buy_positive)
@@ -343,39 +392,59 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
             best_profit_value = 0.0
             best_profit_avg_sell = 0.0
 
-        if top_buy_amount:
-            top_buy_tid, top_buy_agg = top_buy_amount
-            top_buy_name = trader_name_map[(stock_id, top_buy_tid)]
-            top_buy_days_name = top_buy_name
-            top_buy_days_count = top_buy_agg.buy_days
-            top_buy_net_shares = top_buy_agg.net_shares
-            top_buy_cost = top_buy_agg.net_shares * top_buy_agg.avg_buy_price
-            top_buy_avg_price = top_buy_agg.avg_buy_price
+        if top_buy_days:
+            top_buy_days_tid, top_buy_days_agg = top_buy_days
+            top_buy_days_name = trader_name_map[(stock_id, top_buy_days_tid)]
+            top_buy_days_count = top_buy_days_agg.buy_days
         else:
             top_buy_days_name = ""
             top_buy_days_count = 0
+
+        if top_buy_amount:
+            top_buy_tid, top_buy_agg = top_buy_amount
+            top_buy_name = trader_name_map[(stock_id, top_buy_tid)]
+            top_buy_cost = top_buy_agg.net_shares * top_buy_agg.avg_buy_price
+            top_buy_avg_price = top_buy_agg.avg_buy_price
+        else:
             top_buy_name = ""
-            top_buy_net_shares = 0
             top_buy_cost = 0.0
             top_buy_avg_price = 0.0
 
-        if top_sell_amount:
-            top_sell_tid, top_sell_agg = top_sell_amount
-            top_sell_name = trader_name_map[(stock_id, top_sell_tid)]
-            top_sell_days_count = top_sell_agg.sell_days
-            top_sell_net_shares = abs(top_sell_agg.net_shares)
+        if top_buy_shares:
+            _, top_buy_shares_agg = top_buy_shares
+            top_buy_net_shares = top_buy_shares_agg.net_shares
+            top_buy_shares_name = trader_name_map[(stock_id, top_buy_shares[0])]
+        else:
+            top_buy_net_shares = 0
+            top_buy_shares_name = ""
+
+        if top_sell_days:
+            top_sell_days_tid, top_sell_days_agg = top_sell_days
+            top_sell_name = trader_name_map[(stock_id, top_sell_days_tid)]
+            top_sell_days_count = top_sell_days_agg.sell_days
         else:
             top_sell_name = ""
             top_sell_days_count = 0
+
+        if top_sell_shares:
+            _, top_sell_shares_agg = top_sell_shares
+            top_sell_net_shares = abs(top_sell_shares_agg.net_shares)
+            top_sell_shares_name = trader_name_map[(stock_id, top_sell_shares[0])]
+        else:
             top_sell_net_shares = 0
+            top_sell_shares_name = ""
 
         interval_total_volume = float(volume_metrics.get(stock_id, {}).get("interval_total_volume", 0.0))
         top_buy_volume_share = (top_buy_net_shares / interval_total_volume) if interval_total_volume > 0 else 0.0
         top_sell_volume_share = (top_sell_net_shares / interval_total_volume) if interval_total_volume > 0 else 0.0
 
-        buy_days_and_amount_same_branch = "是" if top_buy_name else "否"
+        buy_days_and_amount_same_branch = (
+            "是" if top_buy_days_name and (top_buy_days_name == top_buy_name == top_buy_shares_name) else "否"
+        )
 
-        sell_days_and_profit_same_branch = "是" if top_sell_name else "否"
+        sell_days_and_profit_same_branch = (
+            "是" if top_sell_name and (top_sell_name == best_profit_name == top_sell_shares_name) else "否"
+        )
 
         if top_buy_trade_count:
             top_buy_trade_tid, top_buy_trade_agg = top_buy_trade_count
@@ -404,33 +473,33 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
                 "最近三日平均成交量": round(vol.get("recent_3d_avg_volume", 0.0), 2),
                 "最近五日平均成交量": round(vol.get("recent_5d_avg_volume", 0.0), 2),
                 "區間成交量趨勢": volume_trend_map.get(stock_id, "觀察不出來"),
+                "目前收盤價": round(latest_close_map.get(stock_id, 0.0), 2),
+                "平均買超價格": round(avg_buy_price, 2),
+                "平均賣超價格": round(avg_sell_price, 2),
+                "買超分點數": buy_trader_count,
+                "賣超分點數": sell_trader_count,
+                "籌碼集中度": round(concentration, 4),
                 "總交易筆數": sagg.total_trade_count,
                 "買筆數最多分點": top_buy_trade_name,
                 "買筆數": top_buy_trade_total,
                 "賣筆數最多分點": top_sell_trade_name,
                 "賣筆數": top_sell_trade_total,
-                "買超分點數": buy_trader_count,
-                "賣超分點數": sell_trader_count,
-                "籌碼集中度": round(concentration, 4),
                 "買最多分點名稱": top_buy_days_name,
                 "買超天數": top_buy_days_count,
                 "BDCV": buy_days_and_amount_same_branch,
+                "買超最高分點": top_buy_name,
+                "買超最高分點買超成本": round(top_buy_cost, 2),
+                "買超最高分點平均買超價格": round(top_buy_avg_price, 2),
+                "買超張數最多的分點": top_buy_shares_name,
+                "買超張數": top_buy_net_shares,
+                "買超張數區間成交量佔比": round(top_buy_volume_share, 4),
+                "SDCV": sell_days_and_profit_same_branch,
                 "賣超最多分點名稱": top_sell_name,
                 "賣超天數": top_sell_days_count,
-                "SDCV": sell_days_and_profit_same_branch,
-                "目前收盤價": round(latest_close_map.get(stock_id, 0.0), 2),
-                "平均買超價格": round(avg_buy_price, 2),
-                "平均賣超價格": round(avg_sell_price, 2),
                 "獲利最高分點": best_profit_name,
                 "獲利最高分點獲利金額": round(best_profit_value, 2),
                 "獲利最高分點平均賣價": round(best_profit_avg_sell, 2),
-                "買超最高分點": top_buy_name,
-                "買超張數最多的分點": top_buy_name,
-                "買超張數": top_buy_net_shares,
-                "買超張數區間成交量佔比": round(top_buy_volume_share, 4),
-                "買超最高分點買超成本": round(top_buy_cost, 2),
-                "買超最高分點平均買超價格": round(top_buy_avg_price, 2),
-                "賣超張數最多的分點": top_sell_name,
+                "賣超張數最多的分點": top_sell_shares_name,
                 "賣超張數": top_sell_net_shares,
                 "賣超張數區間成交量佔比": round(top_sell_volume_share, 4),
             }
@@ -446,49 +515,40 @@ def write_csv(rows: List[dict], output_path: str) -> None:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    fieldnames = [
-        "股票代號",
-        "股票名稱",
-        "最新成交量",
-        "區間平均成交量",
-        "最近三日平均成交量",
-        "最近五日平均成交量",
-        "區間成交量趨勢",
-        "總交易筆數",
-        "買筆數最多分點",
-        "買筆數",
-        "賣筆數最多分點",
-        "賣筆數",
-        "買超分點數",
-        "賣超分點數",
-        "籌碼集中度",
-        "買最多分點名稱",
-        "買超天數",
-        "BDCV",
-        "賣超最多分點名稱",
-        "賣超天數",
-        "SDCV",
-        "目前收盤價",
-        "平均買超價格",
-        "平均賣超價格",
-        "獲利最高分點",
-        "獲利最高分點獲利金額",
-        "獲利最高分點平均賣價",
-        "買超最高分點",
-        "買超張數最多的分點",
-        "買超張數",
-        "買超張數區間成交量佔比",
-        "買超最高分點買超成本",
-        "買超最高分點平均買超價格",
-        "賣超張數最多的分點",
-        "賣超張數",
-        "賣超張數區間成交量佔比",
-    ]
-
     with path.open("w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(format_rows_for_output(rows))
+
+
+def _format_thousand(value: object, digits: int = 0) -> str:
+    num = float(value or 0)
+    return f"{num:,.{digits}f}" if digits > 0 else f"{int(round(num)):,}"
+
+
+def format_rows_for_output(rows: List[dict]) -> List[dict]:
+    formatted: List[dict] = []
+    for row in rows:
+        current = dict(row)
+        for col, digits in [
+            ("最新成交量", 0),
+            ("區間平均成交量", 2),
+            ("最近三日平均成交量", 2),
+            ("最近五日平均成交量", 2),
+            ("總交易筆數", 0),
+            ("買超最高分點買超成本", 2),
+            ("獲利最高分點獲利金額", 2),
+            ("賣超張數", 0),
+        ]:
+            current[col] = _format_thousand(current.get(col, 0), digits)
+
+        current["籌碼集中度"] = f"{float(current.get('籌碼集中度', 0)):.2f}"
+        current["買超張數區間成交量佔比"] = f"{float(current.get('買超張數區間成交量佔比', 0)) * 100:.2f}%"
+        current["賣超張數區間成交量佔比"] = f"{float(current.get('賣超張數區間成交量佔比', 0)) * 100:.2f}%"
+
+        formatted.append({k: current.get(k, "") for k in FIELDNAMES})
+
+    return formatted
 
 
 def main() -> int:
