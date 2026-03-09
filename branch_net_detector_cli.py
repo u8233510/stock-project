@@ -181,6 +181,39 @@ def load_volume_metrics(conn: sqlite3.Connection, start: str, end: str) -> Dict[
     return metrics
 
 
+def load_interval_volume_trend(conn: sqlite3.Connection, start: str, end: str) -> Dict[str, str]:
+    sql = """
+    SELECT stock_id, date, COALESCE(Trading_Volume, 0) AS volume
+    FROM stock_daily_trade_detail
+    WHERE date BETWEEN ? AND ?
+    ORDER BY stock_id, date
+    """
+
+    series_map: Dict[str, List[float]] = defaultdict(list)
+    for sid, _date, volume in conn.execute(sql, (start, end)).fetchall():
+        series_map[normalize_stock_id(sid)].append(float(volume or 0.0))
+
+    trend_map: Dict[str, str] = {}
+    for stock_id, volumes in series_map.items():
+        if len(volumes) < 3:
+            trend_map[stock_id] = "觀察不出來"
+            continue
+
+        diffs = [volumes[i + 1] - volumes[i] for i in range(len(volumes) - 1)]
+        up_count = sum(1 for d in diffs if d > 0)
+        down_count = sum(1 for d in diffs if d < 0)
+        total_steps = len(diffs)
+
+        if up_count / total_steps >= 0.7 and volumes[-1] > volumes[0]:
+            trend_map[stock_id] = "逐漸變大"
+        elif down_count / total_steps >= 0.7 and volumes[-1] < volumes[0]:
+            trend_map[stock_id] = "逐漸變小"
+        else:
+            trend_map[stock_id] = "觀察不出來"
+
+    return trend_map
+
+
 def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
     rows = load_branch_rows(conn, start, end)
     if not rows:
@@ -234,6 +267,7 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
     latest_close_map = load_latest_close(conn, end)
     stock_name_map = load_latest_stock_name(conn)
     volume_metrics = load_volume_metrics(conn, start, end)
+    volume_trend_map = load_interval_volume_trend(conn, start, end)
 
     stock_to_traders: Dict[str, List[Tuple[str, TraderAgg]]] = defaultdict(list)
     for (stock_id, trader_id), tagg in trader_agg.items():
@@ -307,6 +341,8 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
             top_buy_cost = 0.0
             top_buy_avg_price = 0.0
 
+        buy_days_and_amount_same_branch = "是" if top_buy_days_name and top_buy_days_name == top_buy_name else "否"
+
         if top_sell_days:
             top_sell_tid, top_sell_agg = top_sell_days
             top_sell_name = trader_name_map[(stock_id, top_sell_tid)]
@@ -314,6 +350,8 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
         else:
             top_sell_name = ""
             top_sell_days_count = 0
+
+        sell_days_and_profit_same_branch = "是" if top_sell_name and top_sell_name == best_profit_name else "否"
 
         if top_buy_trade_count:
             top_buy_trade_tid, top_buy_trade_agg = top_buy_trade_count
@@ -341,6 +379,7 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
                 "區間平均成交量": round(vol.get("interval_avg_volume", 0.0), 2),
                 "最近三日平均成交量": round(vol.get("recent_3d_avg_volume", 0.0), 2),
                 "最近五日平均成交量": round(vol.get("recent_5d_avg_volume", 0.0), 2),
+                "區間成交量趨勢": volume_trend_map.get(stock_id, "觀察不出來"),
                 "總交易筆數": sagg.total_trade_count,
                 "買筆數最多分點": top_buy_trade_name,
                 "買筆數": top_buy_trade_total,
@@ -351,8 +390,10 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
                 "籌碼集中度": round(concentration, 4),
                 "買最多分點名稱": top_buy_days_name,
                 "買超天數": top_buy_days_count,
+                "買最多天分點=買超最高分點": buy_days_and_amount_same_branch,
                 "賣超最多分點名稱": top_sell_name,
                 "賣超天數": top_sell_days_count,
+                "賣最多天分點=獲利最高分點": sell_days_and_profit_same_branch,
                 "目前收盤價": round(latest_close_map.get(stock_id, 0.0), 2),
                 "平均買超價格": round(avg_buy_price, 2),
                 "平均賣超價格": round(avg_sell_price, 2),
@@ -382,6 +423,7 @@ def write_csv(rows: List[dict], output_path: str) -> None:
         "區間平均成交量",
         "最近三日平均成交量",
         "最近五日平均成交量",
+        "區間成交量趨勢",
         "總交易筆數",
         "買筆數最多分點",
         "買筆數",
@@ -392,8 +434,10 @@ def write_csv(rows: List[dict], output_path: str) -> None:
         "籌碼集中度",
         "買最多分點名稱",
         "買超天數",
+        "買最多天分點=買超最高分點",
         "賣超最多分點名稱",
         "賣超天數",
+        "賣最多天分點=獲利最高分點",
         "目前收盤價",
         "平均買超價格",
         "平均賣超價格",

@@ -189,6 +189,73 @@ class BranchNetDetectorCLITest(unittest.TestCase):
         row = rows[0]
         self.assertEqual(row["總交易筆數"], 6)
 
+    def test_flags_and_volume_trend_fields_are_computed(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+
+        conn.executescript(
+            """
+            CREATE TABLE branch_trader_daily_detail (
+                date TEXT,
+                stock_id TEXT,
+                securities_trader_id TEXT,
+                securities_trader TEXT,
+                price REAL,
+                buy INTEGER,
+                sell INTEGER
+            );
+
+            CREATE TABLE stock_daily_trade_detail (
+                date TEXT,
+                stock_id TEXT,
+                close REAL,
+                Trading_Volume INTEGER
+            );
+
+            CREATE TABLE stock_info (
+                date TEXT,
+                stock_id TEXT,
+                stock_name TEXT
+            );
+            """
+        )
+
+        conn.executemany(
+            """
+            INSERT INTO branch_trader_daily_detail
+            (date, stock_id, securities_trader_id, securities_trader, price, buy, sell)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("2024-01-01", "1101", "A", "分點A", 10, 120, 0),
+                ("2024-01-02", "1101", "A", "分點A", 11, 80, 0),
+                ("2024-01-03", "1101", "A", "分點A", 12, 0, 100),
+                ("2024-01-04", "1101", "A", "分點A", 13, 0, 80),
+                ("2024-01-01", "1101", "B", "分點B", 10, 0, 120),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO stock_daily_trade_detail (date, stock_id, close, Trading_Volume) VALUES (?, ?, ?, ?)",
+            [
+                ("2024-01-01", "1101", 20.0, 100),
+                ("2024-01-02", "1101", 20.5, 200),
+                ("2024-01-03", "1101", 21.0, 300),
+                ("2024-01-04", "1101", 21.5, 400),
+            ],
+        )
+        conn.execute(
+            "INSERT INTO stock_info (date, stock_id, stock_name) VALUES ('2024-01-04', '1101', '台泥')"
+        )
+        conn.commit()
+
+        rows = build_summary(conn, "2024-01-01", "2024-01-04")
+        self.assertEqual(len(rows), 1)
+
+        row = rows[0]
+        self.assertEqual(row["買最多天分點=買超最高分點"], "是")
+        self.assertEqual(row["賣最多天分點=獲利最高分點"], "是")
+        self.assertEqual(row["區間成交量趨勢"], "逐漸變大")
+
 
 if __name__ == "__main__":
     unittest.main()
