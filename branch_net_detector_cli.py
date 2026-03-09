@@ -137,7 +137,10 @@ def load_volume_metrics(conn: sqlite3.Connection, start: str, end: str) -> Dict[
         GROUP BY stock_id
     ),
     interval_avg AS (
-        SELECT stock_id, AVG(COALESCE(Trading_Volume, 0)) AS interval_avg_volume
+        SELECT
+            stock_id,
+            AVG(COALESCE(Trading_Volume, 0)) AS interval_avg_volume,
+            SUM(COALESCE(Trading_Volume, 0)) AS interval_total_volume
         FROM stock_daily_trade_detail
         WHERE date BETWEEN ? AND ?
         GROUP BY stock_id
@@ -157,6 +160,7 @@ def load_volume_metrics(conn: sqlite3.Connection, start: str, end: str) -> Dict[
         ld.stock_id,
         COALESCE(latest.volume, 0) AS latest_volume,
         COALESCE(ia.interval_avg_volume, 0) AS interval_avg_volume,
+        COALESCE(ia.interval_total_volume, 0) AS interval_total_volume,
         COALESCE(AVG(CASE WHEN lw.rn <= 3 THEN lw.volume END), 0) AS recent_3d_avg_volume,
         COALESCE(AVG(CASE WHEN lw.rn <= 5 THEN lw.volume END), 0) AS recent_5d_avg_volume
     FROM latest_day ld
@@ -166,15 +170,18 @@ def load_volume_metrics(conn: sqlite3.Connection, start: str, end: str) -> Dict[
         ON ia.stock_id = ld.stock_id
     LEFT JOIN latest_window lw
         ON lw.stock_id = ld.stock_id
-    GROUP BY ld.stock_id, latest.volume, ia.interval_avg_volume
+    GROUP BY ld.stock_id, latest.volume, ia.interval_avg_volume, ia.interval_total_volume
     """
 
     metrics: Dict[str, dict] = {}
-    for sid, latest_v, interval_avg_v, recent3_v, recent5_v in conn.execute(sql, (end, start, end)).fetchall():
+    for sid, latest_v, interval_avg_v, interval_total_v, recent3_v, recent5_v in conn.execute(
+        sql, (end, start, end)
+    ).fetchall():
         stock_id = normalize_stock_id(sid)
         metrics[stock_id] = {
             "latest_volume": int(round(float(latest_v or 0))),
             "interval_avg_volume": float(interval_avg_v or 0),
+            "interval_total_volume": float(interval_total_v or 0),
             "recent_3d_avg_volume": float(recent3_v or 0),
             "recent_5d_avg_volume": float(recent5_v or 0),
         }
@@ -299,12 +306,11 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
             (buy_trader_count - sell_trader_count) / total_trader_count if total_trader_count else 0.0
         )
 
-        top_buy_days = max(traders, key=lambda x: x[1].buy_days, default=None)
-        top_sell_days = max(traders, key=lambda x: x[1].sell_days, default=None)
         top_buy_trade_count = max(traders, key=lambda x: x[1].buy_trade_count, default=None)
         top_sell_trade_count = max(traders, key=lambda x: x[1].sell_trade_count, default=None)
 
-        top_buy_amount = max(buy_positive, key=lambda x: x[1].buy_amount, default=None)
+        top_buy_amount = max(buy_positive, key=lambda x: x[1].net_shares, default=None)
+        top_sell_amount = min(sell_negative, key=lambda x: x[1].net_shares, default=None)
 
         buy_positive_total_shares = sum(tagg.buy_shares for _, tagg in buy_positive)
         buy_positive_total_amount = sum(tagg.buy_amount for _, tagg in buy_positive)
@@ -337,35 +343,39 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
             best_profit_value = 0.0
             best_profit_avg_sell = 0.0
 
-        if top_buy_days:
-            top_buy_tid, top_buy_agg = top_buy_days
-            top_buy_days_name = trader_name_map[(stock_id, top_buy_tid)]
-            top_buy_days_count = top_buy_agg.buy_days
-        else:
-            top_buy_days_name = ""
-            top_buy_days_count = 0
-
         if top_buy_amount:
             top_buy_tid, top_buy_agg = top_buy_amount
             top_buy_name = trader_name_map[(stock_id, top_buy_tid)]
+            top_buy_days_name = top_buy_name
+            top_buy_days_count = top_buy_agg.buy_days
+            top_buy_net_shares = top_buy_agg.net_shares
             top_buy_cost = top_buy_agg.net_shares * top_buy_agg.avg_buy_price
             top_buy_avg_price = top_buy_agg.avg_buy_price
         else:
+            top_buy_days_name = ""
+            top_buy_days_count = 0
             top_buy_name = ""
+            top_buy_net_shares = 0
             top_buy_cost = 0.0
             top_buy_avg_price = 0.0
 
-        buy_days_and_amount_same_branch = "是" if top_buy_days_name and top_buy_days_name == top_buy_name else "否"
-
-        if top_sell_days:
-            top_sell_tid, top_sell_agg = top_sell_days
+        if top_sell_amount:
+            top_sell_tid, top_sell_agg = top_sell_amount
             top_sell_name = trader_name_map[(stock_id, top_sell_tid)]
             top_sell_days_count = top_sell_agg.sell_days
+            top_sell_net_shares = abs(top_sell_agg.net_shares)
         else:
             top_sell_name = ""
             top_sell_days_count = 0
+            top_sell_net_shares = 0
 
-        sell_days_and_profit_same_branch = "是" if top_sell_name and top_sell_name == best_profit_name else "否"
+        interval_total_volume = float(volume_metrics.get(stock_id, {}).get("interval_total_volume", 0.0))
+        top_buy_volume_share = (top_buy_net_shares / interval_total_volume) if interval_total_volume > 0 else 0.0
+        top_sell_volume_share = (top_sell_net_shares / interval_total_volume) if interval_total_volume > 0 else 0.0
+
+        buy_days_and_amount_same_branch = "是" if top_buy_name else "否"
+
+        sell_days_and_profit_same_branch = "是" if top_sell_name else "否"
 
         if top_buy_trade_count:
             top_buy_trade_tid, top_buy_trade_agg = top_buy_trade_count
@@ -404,10 +414,10 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
                 "籌碼集中度": round(concentration, 4),
                 "買最多分點名稱": top_buy_days_name,
                 "買超天數": top_buy_days_count,
-                "買最多天分點=買超最高分點": buy_days_and_amount_same_branch,
+                "BDCV": buy_days_and_amount_same_branch,
                 "賣超最多分點名稱": top_sell_name,
                 "賣超天數": top_sell_days_count,
-                "賣最多天分點=獲利最高分點": sell_days_and_profit_same_branch,
+                "SDCV": sell_days_and_profit_same_branch,
                 "目前收盤價": round(latest_close_map.get(stock_id, 0.0), 2),
                 "平均買超價格": round(avg_buy_price, 2),
                 "平均賣超價格": round(avg_sell_price, 2),
@@ -415,8 +425,14 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
                 "獲利最高分點獲利金額": round(best_profit_value, 2),
                 "獲利最高分點平均賣價": round(best_profit_avg_sell, 2),
                 "買超最高分點": top_buy_name,
+                "買超張數最多的分點": top_buy_name,
+                "買超張數": top_buy_net_shares,
+                "買超張數區間成交量佔比": round(top_buy_volume_share, 4),
                 "買超最高分點買超成本": round(top_buy_cost, 2),
                 "買超最高分點平均買超價格": round(top_buy_avg_price, 2),
+                "賣超張數最多的分點": top_sell_name,
+                "賣超張數": top_sell_net_shares,
+                "賣超張數區間成交量佔比": round(top_sell_volume_share, 4),
             }
         )
 
@@ -448,10 +464,10 @@ def write_csv(rows: List[dict], output_path: str) -> None:
         "籌碼集中度",
         "買最多分點名稱",
         "買超天數",
-        "買最多天分點=買超最高分點",
+        "BDCV",
         "賣超最多分點名稱",
         "賣超天數",
-        "賣最多天分點=獲利最高分點",
+        "SDCV",
         "目前收盤價",
         "平均買超價格",
         "平均賣超價格",
@@ -459,8 +475,14 @@ def write_csv(rows: List[dict], output_path: str) -> None:
         "獲利最高分點獲利金額",
         "獲利最高分點平均賣價",
         "買超最高分點",
+        "買超張數最多的分點",
+        "買超張數",
+        "買超張數區間成交量佔比",
         "買超最高分點買超成本",
         "買超最高分點平均買超價格",
+        "賣超張數最多的分點",
+        "賣超張數",
+        "賣超張數區間成交量佔比",
     ]
 
     with path.open("w", newline="", encoding="utf-8-sig") as f:
