@@ -13,7 +13,7 @@ import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Callable, Dict, Iterable, List, Tuple
 
 
 FIELDNAMES = [
@@ -36,23 +36,23 @@ FIELDNAMES = [
     "賣筆數最多分點",
     "賣筆數",
     "BDCV",
-    "買最多分點名稱",
+    "買超天數最多分點",
     "買超天數",
-    "買超最高分點",
-    "買超最高分點買超成本",
-    "買超最高分點平均買超價格",
-    "買超張數最多的分點",
-    "買超張數",
-    "買超張數區間成交量佔比",
+    "買超金額最多分點",
+    "買超金額最多分點買超成本",
+    "買超金額最多分點平均買超價格",
+    "買超量最多分點",
+    "買超量",
+    "買超量/成交量佔比",
     "SDCV",
-    "賣超最多分點名稱",
+    "賣超天數最多分點",
     "賣超天數",
     "獲利最高分點",
     "獲利最高分點獲利金額",
     "獲利最高分點平均賣價",
-    "賣超張數最多的分點",
-    "賣超張數",
-    "賣超張數區間成交量佔比",
+    "賣超量最多分點",
+    "賣超量",
+    "賣超量/成交量佔比",
 ]
 
 
@@ -125,6 +125,15 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def count_branch_rows(conn: sqlite3.Connection, start: str, end: str) -> int:
+    sql = """
+    SELECT COUNT(*)
+    FROM branch_trader_daily_detail
+    WHERE date BETWEEN ? AND ?
+    """
+    return int(conn.execute(sql, (start, end)).fetchone()[0] or 0)
+
+
 def load_branch_rows(conn: sqlite3.Connection, start: str, end: str) -> Iterable[sqlite3.Row]:
     sql = """
     SELECT
@@ -138,7 +147,7 @@ def load_branch_rows(conn: sqlite3.Connection, start: str, end: str) -> Iterable
     FROM branch_trader_daily_detail
     WHERE date BETWEEN ? AND ?
     """
-    return conn.execute(sql, (start, end)).fetchall()
+    return conn.execute(sql, (start, end))
 
 
 def load_latest_close(conn: sqlite3.Connection, end: str) -> Dict[str, float]:
@@ -275,17 +284,28 @@ def load_interval_volume_trend(conn: sqlite3.Connection, start: str, end: str) -
     return trend_map
 
 
-def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
-    rows = load_branch_rows(conn, start, end)
-    if not rows:
+def build_summary(
+    conn: sqlite3.Connection,
+    start: str,
+    end: str,
+    progress_callback: Callable[[float, str], None] | None = None,
+) -> List[dict]:
+    total_rows = count_branch_rows(conn, start, end)
+    if total_rows <= 0:
         return []
+
+    if progress_callback:
+        progress_callback(0.01, f"已找到 {total_rows:,} 筆分點明細，開始彙總中…")
+
+    rows = load_branch_rows(conn, start, end)
 
     stock_agg: Dict[str, StockAgg] = defaultdict(StockAgg)
     trader_agg: Dict[Tuple[str, str], TraderAgg] = defaultdict(TraderAgg)
     trader_name_map: Dict[Tuple[str, str], str] = {}
     trader_day_net: Dict[Tuple[str, str, str], int] = defaultdict(int)
 
-    for r in rows:
+    row_step = max(20000, total_rows // 100)
+    for idx, r in enumerate(rows, start=1):
         date = str(r[0])
         stock_id = normalize_stock_id(r[1])
         trader_id = str(r[2])
@@ -318,6 +338,10 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
 
         trader_day_net[(stock_id, trader_id, date)] += buy - sell
 
+        if progress_callback and (idx % row_step == 0 or idx == total_rows):
+            pct = 0.01 + 0.59 * (idx / total_rows)
+            progress_callback(pct, f"彙總分點明細中… {idx:,}/{total_rows:,}")
+
     for (stock_id, trader_id, _date), day_net in trader_day_net.items():
         tagg = trader_agg[(stock_id, trader_id)]
         if day_net > 0:
@@ -326,8 +350,14 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
             tagg.sell_days += 1
 
     latest_close_map = load_latest_close(conn, end)
+    if progress_callback:
+        progress_callback(0.70, "載入股票收盤價與名稱資料…")
     stock_name_map = load_latest_stock_name(conn)
+    if progress_callback:
+        progress_callback(0.78, "計算成交量統計（區間/近3日/近5日）…")
     volume_metrics = load_volume_metrics(conn, start, end)
+    if progress_callback:
+        progress_callback(0.88, "分析區間成交量趨勢…")
     volume_trend_map = load_interval_volume_trend(conn, start, end)
 
     stock_to_traders: Dict[str, List[Tuple[str, TraderAgg]]] = defaultdict(list)
@@ -335,7 +365,9 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
         stock_to_traders[stock_id].append((trader_id, tagg))
 
     output: List[dict] = []
-    for stock_id, sagg in stock_agg.items():
+    total_stocks = len(stock_agg)
+    stock_step = max(1, total_stocks // 20)
+    for stock_idx, (stock_id, sagg) in enumerate(stock_agg.items(), start=1):
         traders = stock_to_traders.get(stock_id, [])
         buy_positive = [x for x in traders if x[1].net_shares > 0]
         sell_negative = [x for x in traders if x[1].net_shares < 0]
@@ -484,26 +516,30 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
                 "買筆數": top_buy_trade_total,
                 "賣筆數最多分點": top_sell_trade_name,
                 "賣筆數": top_sell_trade_total,
-                "買最多分點名稱": top_buy_days_name,
+                "買超天數最多分點": top_buy_days_name,
                 "買超天數": top_buy_days_count,
                 "BDCV": buy_days_and_amount_same_branch,
-                "買超最高分點": top_buy_name,
-                "買超最高分點買超成本": round(top_buy_cost, 2),
-                "買超最高分點平均買超價格": round(top_buy_avg_price, 2),
-                "買超張數最多的分點": top_buy_shares_name,
-                "買超張數": top_buy_net_shares,
-                "買超張數區間成交量佔比": round(top_buy_volume_share, 4),
+                "買超金額最多分點": top_buy_name,
+                "買超金額最多分點買超成本": round(top_buy_cost, 2),
+                "買超金額最多分點平均買超價格": round(top_buy_avg_price, 2),
+                "買超量最多分點": top_buy_shares_name,
+                "買超量": top_buy_net_shares,
+                "買超量/成交量佔比": round(top_buy_volume_share, 4),
                 "SDCV": sell_days_and_profit_same_branch,
-                "賣超最多分點名稱": top_sell_name,
+                "賣超天數最多分點": top_sell_name,
                 "賣超天數": top_sell_days_count,
                 "獲利最高分點": best_profit_name,
                 "獲利最高分點獲利金額": round(best_profit_value, 2),
                 "獲利最高分點平均賣價": round(best_profit_avg_sell, 2),
-                "賣超張數最多的分點": top_sell_shares_name,
-                "賣超張數": top_sell_net_shares,
-                "賣超張數區間成交量佔比": round(top_sell_volume_share, 4),
+                "賣超量最多分點": top_sell_shares_name,
+                "賣超量": top_sell_net_shares,
+                "賣超量/成交量佔比": round(top_sell_volume_share, 4),
             }
         )
+
+        if progress_callback and (stock_idx % stock_step == 0 or stock_idx == total_stocks):
+            pct = 0.90 + 0.10 * (stock_idx / max(total_stocks, 1))
+            progress_callback(pct, f"組裝輸出中… {stock_idx:,}/{total_stocks:,} 檔股票")
 
     output.sort(key=lambda x: x["股票代號"])
     return output
@@ -536,15 +572,15 @@ def format_rows_for_output(rows: List[dict]) -> List[dict]:
             ("最近三日平均成交量", 2),
             ("最近五日平均成交量", 2),
             ("總交易筆數", 0),
-            ("買超最高分點買超成本", 2),
+            ("買超金額最多分點買超成本", 2),
             ("獲利最高分點獲利金額", 2),
-            ("賣超張數", 0),
+            ("賣超量", 0),
         ]:
             current[col] = _format_thousand(current.get(col, 0), digits)
 
         current["籌碼集中度"] = f"{float(current.get('籌碼集中度', 0)):.2f}"
-        current["買超張數區間成交量佔比"] = f"{float(current.get('買超張數區間成交量佔比', 0)) * 100:.2f}%"
-        current["賣超張數區間成交量佔比"] = f"{float(current.get('賣超張數區間成交量佔比', 0)) * 100:.2f}%"
+        current["買超量/成交量佔比"] = f"{float(current.get('買超量/成交量佔比', 0)) * 100:.2f}%"
+        current["賣超量/成交量佔比"] = f"{float(current.get('賣超量/成交量佔比', 0)) * 100:.2f}%"
 
         formatted.append({k: current.get(k, "") for k in FIELDNAMES})
 
@@ -560,7 +596,11 @@ def main() -> int:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
-        result = build_summary(conn, args.start, args.end)
+        def _cli_progress(ratio: float, message: str) -> None:
+            pct = max(0, min(100, int(ratio * 100)))
+            print(f"[{pct:3d}%] {message}")
+
+        result = build_summary(conn, args.start, args.end, progress_callback=_cli_progress)
     finally:
         conn.close()
 
