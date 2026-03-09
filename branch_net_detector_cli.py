@@ -24,6 +24,8 @@ class TraderAgg:
     sell_amount: float = 0.0
     buy_days: int = 0
     sell_days: int = 0
+    buy_trade_count: int = 0
+    sell_trade_count: int = 0
 
     @property
     def net_shares(self) -> int:
@@ -44,6 +46,7 @@ class StockAgg:
     sell_shares: int = 0
     buy_amount: float = 0.0
     sell_amount: float = 0.0
+    total_trade_count: int = 0
 
     @property
     def net_shares(self) -> int:
@@ -202,6 +205,10 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
         sagg.sell_shares += sell
         sagg.buy_amount += price * buy
         sagg.sell_amount += price * sell
+        if buy > 0:
+            sagg.total_trade_count += 1
+        if sell > 0:
+            sagg.total_trade_count += 1
 
         key = (stock_id, trader_id)
         tagg = trader_agg[key]
@@ -209,6 +216,10 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
         tagg.sell_shares += sell
         tagg.buy_amount += price * buy
         tagg.sell_amount += price * sell
+        if buy > 0:
+            tagg.buy_trade_count += 1
+        if sell > 0:
+            tagg.sell_trade_count += 1
         trader_name_map[key] = trader_name
 
         trader_day_net[(stock_id, trader_id, date)] += buy - sell
@@ -242,6 +253,8 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
 
         top_buy_days = max(traders, key=lambda x: x[1].buy_days, default=None)
         top_sell_days = max(traders, key=lambda x: x[1].sell_days, default=None)
+        top_buy_trade_count = max(traders, key=lambda x: x[1].buy_trade_count, default=None)
+        top_sell_trade_count = max(traders, key=lambda x: x[1].sell_trade_count, default=None)
 
         top_buy_amount = max(buy_positive, key=lambda x: x[1].buy_amount, default=None)
 
@@ -302,6 +315,22 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
             top_sell_name = ""
             top_sell_days_count = 0
 
+        if top_buy_trade_count:
+            top_buy_trade_tid, top_buy_trade_agg = top_buy_trade_count
+            top_buy_trade_name = trader_name_map[(stock_id, top_buy_trade_tid)]
+            top_buy_trade_total = top_buy_trade_agg.buy_trade_count
+        else:
+            top_buy_trade_name = ""
+            top_buy_trade_total = 0
+
+        if top_sell_trade_count:
+            top_sell_trade_tid, top_sell_trade_agg = top_sell_trade_count
+            top_sell_trade_name = trader_name_map[(stock_id, top_sell_trade_tid)]
+            top_sell_trade_total = top_sell_trade_agg.sell_trade_count
+        else:
+            top_sell_trade_name = ""
+            top_sell_trade_total = 0
+
         vol = volume_metrics.get(stock_id, {})
 
         output.append(
@@ -312,6 +341,11 @@ def build_summary(conn: sqlite3.Connection, start: str, end: str) -> List[dict]:
                 "區間平均成交量": round(vol.get("interval_avg_volume", 0.0), 2),
                 "最近三日平均成交量": round(vol.get("recent_3d_avg_volume", 0.0), 2),
                 "最近五日平均成交量": round(vol.get("recent_5d_avg_volume", 0.0), 2),
+                "總交易筆數": sagg.total_trade_count,
+                "買筆數最多分點": top_buy_trade_name,
+                "買筆數": top_buy_trade_total,
+                "賣筆數最多分點": top_sell_trade_name,
+                "賣筆數": top_sell_trade_total,
                 "買超分點數": buy_trader_count,
                 "賣超分點數": sell_trader_count,
                 "籌碼集中度": round(concentration, 4),
@@ -348,6 +382,11 @@ def write_csv(rows: List[dict], output_path: str) -> None:
         "區間平均成交量",
         "最近三日平均成交量",
         "最近五日平均成交量",
+        "總交易筆數",
+        "買筆數最多分點",
+        "買筆數",
+        "賣筆數最多分點",
+        "賣筆數",
         "買超分點數",
         "賣超分點數",
         "籌碼集中度",
