@@ -1,7 +1,7 @@
 import sqlite3
 import unittest
 
-from branch_net_detector_cli import build_summary
+from branch_net_detector_cli import FIELDNAMES, build_summary, format_rows_for_output
 
 
 class BranchNetDetectorCLITest(unittest.TestCase):
@@ -252,9 +252,60 @@ class BranchNetDetectorCLITest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
 
         row = rows[0]
-        self.assertEqual(row["買最多天分點=買超最高分點"], "是")
-        self.assertEqual(row["賣最多天分點=獲利最高分點"], "是")
-        self.assertEqual(row["區間成交量趨勢"], "逐漸變大")
+        self.assertEqual(row["BDCV"], "是")
+        self.assertEqual(row["SDCV"], "否")
+        self.assertEqual(row["區間成交量趨勢"], "觀察不出來")
+
+
+    def test_format_rows_for_output_applies_column_order_and_number_format(self):
+        rows = [
+            {
+                "股票代號": "2330",
+                "股票名稱": "台積電",
+                "最新成交量": 1234567,
+                "區間平均成交量": 98765.4321,
+                "最近三日平均成交量": 11111.666,
+                "最近五日平均成交量": 22222.555,
+                "區間成交量趨勢": "逐漸變大",
+                "目前收盤價": 600.5,
+                "平均買超價格": 599.1,
+                "平均賣超價格": 601.2,
+                "買超分點數": 5,
+                "賣超分點數": 3,
+                "籌碼集中度": 0.2345,
+                "總交易筆數": 1200,
+                "買筆數最多分點": "分點甲",
+                "買筆數": 12,
+                "賣筆數最多分點": "分點乙",
+                "賣筆數": 10,
+                "BDCV": "是",
+                "買最多分點名稱": "分點甲",
+                "買超天數": 8,
+                "買超最高分點": "分點甲",
+                "買超最高分點買超成本": 1234567.89,
+                "買超最高分點平均買超價格": 598.8,
+                "買超張數最多的分點": "分點甲",
+                "買超張數": 999,
+                "買超張數區間成交量佔比": 0.1299,
+                "SDCV": "否",
+                "賣超最多分點名稱": "分點丙",
+                "賣超天數": 7,
+                "獲利最高分點": "分點丁",
+                "獲利最高分點獲利金額": 7654321.99,
+                "獲利最高分點平均賣價": 602.3,
+                "賣超張數最多的分點": "分點丙",
+                "賣超張數": 3333,
+                "賣超張數區間成交量佔比": 0.0456,
+            }
+        ]
+
+        formatted = format_rows_for_output(rows)
+        self.assertEqual(list(formatted[0].keys()), FIELDNAMES)
+        self.assertEqual(formatted[0]["最新成交量"], "1,234,567")
+        self.assertEqual(formatted[0]["區間平均成交量"], "98,765.43")
+        self.assertEqual(formatted[0]["籌碼集中度"], "0.23")
+        self.assertEqual(formatted[0]["買超張數區間成交量佔比"], "12.99%")
+        self.assertEqual(formatted[0]["賣超張數區間成交量佔比"], "4.56%")
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ from datetime import date
 
 import streamlit as st
 
-from branch_net_detector_cli import build_summary
+from branch_net_detector_cli import FIELDNAMES, build_summary, format_rows_for_output
 
 
 def _rows_to_csv_bytes(rows: list[dict]) -> bytes:
@@ -14,9 +14,9 @@ def _rows_to_csv_bytes(rows: list[dict]) -> bytes:
         return b""
 
     output = StringIO()
-    writer = csv.DictWriter(output, fieldnames=list(rows[0].keys()))
+    writer = csv.DictWriter(output, fieldnames=FIELDNAMES)
     writer.writeheader()
-    writer.writerows(rows)
+    writer.writerows(format_rows_for_output(rows))
     return output.getvalue().encode("utf-8-sig")
 
 
@@ -53,7 +53,7 @@ def show_branch_net_detector_entry() -> None:
             return
 
         st.success(f"查詢完成，共 {len(rows)} 檔股票。")
-        st.dataframe(rows, use_container_width=True)
+        st.dataframe(format_rows_for_output(rows), use_container_width=True)
 
         csv_bytes = _rows_to_csv_bytes(rows)
         st.download_button(
