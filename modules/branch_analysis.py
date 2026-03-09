@@ -62,6 +62,45 @@ def _compute_window_snapshot_from_branch(interval_df, end_date, top_n=15):
     return (float(avg_cost or 0), int(total_net_volume or 0), float(concentration or 0), str(end_date))
 
 
+def _build_top_branch_flow_fields(interval_df):
+    if interval_df.empty:
+        return None, None, 0
+
+    grouped = (
+        interval_df.assign(net_volume=interval_df["buy"] - interval_df["sell"])
+        .groupby("securities_trader_id", as_index=False)["net_volume"]
+        .sum()
+    )
+    grouped = grouped[grouped["net_volume"] != 0]
+    total_interval_volume = float((interval_df["buy"] + interval_df["sell"]).sum())
+
+    if grouped.empty:
+        return None, None, total_interval_volume
+
+    top_buy_row = grouped.loc[grouped["net_volume"].idxmax()]
+    top_sell_row = grouped.loc[grouped["net_volume"].idxmin()]
+
+    top_buy = None
+    if float(top_buy_row["net_volume"]) > 0:
+        buy_volume = float(top_buy_row["net_volume"])
+        top_buy = {
+            "branch": str(top_buy_row["securities_trader_id"]),
+            "volume": int(round(buy_volume)),
+            "ratio": (buy_volume / total_interval_volume * 100) if total_interval_volume > 0 else 0.0,
+        }
+
+    top_sell = None
+    if float(top_sell_row["net_volume"]) < 0:
+        sell_volume = abs(float(top_sell_row["net_volume"]))
+        top_sell = {
+            "branch": str(top_sell_row["securities_trader_id"]),
+            "volume": int(round(sell_volume)),
+            "ratio": (sell_volume / total_interval_volume * 100) if total_interval_volume > 0 else 0.0,
+        }
+
+    return top_buy, top_sell, total_interval_volume
+
+
 def _build_lightgbm_feature_frame(conn, sid, max_trade_days=320, top_n=15):
     trade_dates_desc = conn.execute(
         """
@@ -355,6 +394,7 @@ def show_branch_analysis():
             return
 
         main_force_cost, total_net_volume, chip_concentration = _compute_interval_metrics(interval_df, top_n=top_n)
+        top_buy, top_sell, _ = _build_top_branch_flow_fields(interval_df)
 
         m1, m2, m3 = st.columns(3)
         with m1: st.metric("核心主力加權成本", f"${main_force_cost}")
@@ -364,6 +404,32 @@ def show_branch_analysis():
         with m3:
             st.metric("買方籌碼集中度", f"{chip_concentration:.2f}%")
             st.caption("定義：前 N 大買超分點淨買超總和 / 全市場總買量。負值代表賣壓強於買盤。")
+
+        f1, f2 = st.columns(2)
+        with f1:
+            if top_buy:
+                st.metric(
+                    "買超張數最多分點",
+                    top_buy["branch"],
+                    delta=f"{top_buy['volume']} 張 / {top_buy['ratio']:.2f}%",
+                    delta_color="normal",
+                )
+                st.caption("delta：買超張數 / 區間成交量佔比")
+            else:
+                st.metric("買超張數最多分點", "N/A")
+                st.caption("區間內無正買超分點")
+        with f2:
+            if top_sell:
+                st.metric(
+                    "賣超張數最多分點",
+                    top_sell["branch"],
+                    delta=f"{top_sell['volume']} 張 / {top_sell['ratio']:.2f}%",
+                    delta_color="inverse",
+                )
+                st.caption("delta：賣超張數 / 區間成交量佔比")
+            else:
+                st.metric("賣超張數最多分點", "N/A")
+                st.caption("區間內無正賣超分點")
 
         default_max_trade_days = cfg.get("branch_analysis", {}).get("lightgbm_default_max_trade_days", 320)
         lightgbm_max_trade_days = _resolve_lightgbm_max_trade_days(
