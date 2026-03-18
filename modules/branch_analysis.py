@@ -356,14 +356,26 @@ def show_branch_analysis():
 
         main_force_cost, total_net_volume, chip_concentration = _compute_interval_metrics(interval_df, top_n=top_n)
 
-        m1, m2, m3 = st.columns(3)
+        branch_net = (
+            interval_df.groupby("securities_trader_id", dropna=False)[["buy", "sell"]]
+            .sum()
+            .assign(net=lambda x: x["buy"] - x["sell"])
+        )
+        buy_branch_count = int((branch_net["net"] > 0).sum())
+        sell_branch_count = int((branch_net["net"] < 0).sum())
+        branch_count_ratio = (buy_branch_count / sell_branch_count) if sell_branch_count > 0 else (float(buy_branch_count) if buy_branch_count > 0 else 0.0)
+
+        m1, m2, m3, m4 = st.columns(4)
         with m1: st.metric("核心主力加權成本", f"${main_force_cost}")
         with m2:
             cost_gap = round(((current_price - main_force_cost) / main_force_cost) * 100, 2) if main_force_cost > 0 else 0
             st.metric("目前價格位階", f"{cost_gap}%", delta=f"{cost_gap}%", delta_color="normal")
         with m3:
-            st.metric("買方籌碼集中度", f"{chip_concentration:.2f}%")
-            st.caption("定義：前 N 大買超分點淨買超總和 / 全市場總買量。負值代表賣壓強於買盤。")
+            st.metric("前N大淨買超/總買量", f"{chip_concentration:.2f}%")
+            st.caption("定義：前 N 大分點淨買超 / 全市場總買量。負值代表前 N 大分點合計偏賣。")
+        with m4:
+            st.metric("買超/賣超分點家數比", f"{branch_count_ratio:.2f}")
+            st.caption("定義：買超分點數 ÷ 賣超分點數；若無賣超分點，則顯示買超分點數。")
 
         default_max_trade_days = cfg.get("branch_analysis", {}).get("lightgbm_default_max_trade_days", 320)
         lightgbm_max_trade_days = _resolve_lightgbm_max_trade_days(
@@ -410,7 +422,7 @@ def show_branch_analysis():
                 st.info(lgbm_result["message"])
 
         if chip_concentration > 30:
-            st.error(f"⚠️ 偵測到籌碼異常集中！前五大分點買超佔比達 {chip_concentration}%")
+            st.error(f"⚠️ 偵測到籌碼異常集中！前五大分點淨買超 / 全市場總買量達 {chip_concentration}%")
         
         st.caption("最新 rolling 快照：5日 / 20日 / 60日")
         w1, w2, w3 = st.columns(3)
