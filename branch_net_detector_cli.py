@@ -45,6 +45,7 @@ FIELDNAMES = [
     "買超金額最多分點",
     "買超金額最多分點買超成本",
     "買超金額最多分點平均買超價格",
+    "TBC",
     "買超量最多分點",
     "買超量",
     "買超量/成交量佔比",
@@ -55,6 +56,7 @@ FIELDNAMES = [
     "獲利最高分點",
     "獲利最高分點獲利金額",
     "獲利最高分點平均賣價",
+    "TSC",
     "賣超量最多分點",
     "賣超量",
     "賣超量/成交量佔比",
@@ -512,12 +514,15 @@ def build_summary(
             top_sell_shares_name = ""
 
         interval_total_volume = float(volume_metrics.get(stock_id, {}).get("interval_total_volume", 0.0))
+        market_total_buy_volume = float(sagg.buy_shares)
         top_buy_volume_share = (top_buy_net_shares / interval_total_volume) if interval_total_volume > 0 else 0.0
         top_sell_volume_share = (top_sell_net_shares / interval_total_volume) if interval_total_volume > 0 else 0.0
 
         top15_buy_total = sum(tagg.net_shares for _, tagg in sorted(buy_positive, key=lambda x: x[1].net_shares, reverse=True)[:15])
         top15_sell_total = sum(abs(tagg.net_shares) for _, tagg in sorted(sell_negative, key=lambda x: x[1].net_shares)[:15])
-        top15_diff_ratio = ((top15_buy_total - top15_sell_total) / interval_total_volume) if interval_total_volume > 0 else 0.0
+        top15_net_buy = top15_buy_total - top15_sell_total
+        top15_buy_over_market_buy_ratio = (top15_net_buy / market_total_buy_volume) if market_total_buy_volume > 0 else 0.0
+        top15_diff_ratio = (top15_net_buy / interval_total_volume) if interval_total_volume > 0 else 0.0
 
         branch_ratio_series = stock_daily_branch_ratio.get(stock_id, [])
         recent_3d_branch_count_ratio = (
@@ -541,13 +546,15 @@ def build_summary(
             if actual_holding_cost_basis > 0
             else 0.0
         )
-        latest_volume = float(vol.get("latest_volume", 0.0))
         latest_close = float(latest_close_map.get(stock_id, 0.0))
         market_value = float(market_value_map.get(stock_id, 0.0))
-        # FinMind TaiwanStockPrice.Trading_Volume 與 market_value / close 皆為「股」單位，
-        # 因此周轉率統一為：成交股數 / 發行股數。
-        issued_shares = (market_value / latest_close) if latest_close > 0 else 0.0
-        turnover_rate = (latest_volume / issued_shares) if issued_shares > 0 else 0.0
+        # 資料表沒有獨立的「發行股數」欄位，這裡是用 stock_market_value_daily.market_value
+        # 搭配最新收盤價 latest_close 反推：估算發行股數 = 市值 / 股價。
+        estimated_issued_shares = (market_value / latest_close) if latest_close > 0 else 0.0
+        # 這份報表為區間彙總，因此周轉率採用「區間總成交股數 / 估算發行股數」。
+        turnover_rate = (interval_total_volume / estimated_issued_shares) if estimated_issued_shares > 0 else 0.0
+        tbc = (top_buy_avg_price / latest_close) if latest_close > 0 else 0.0
+        tsc = (best_profit_avg_sell / latest_close) if latest_close > 0 else 0.0
 
         buy_days_and_amount_same_branch = (
             "是" if top_buy_days_name and (top_buy_days_name == top_buy_name == top_buy_shares_name) else "否"
@@ -588,7 +595,7 @@ def build_summary(
                 "買超分點數": buy_trader_count,
                 "賣超分點數": sell_trader_count,
                 "買超賣超家數比": round(branch_count_ratio, 4),
-                "前15大分點淨買超 / 全市場總買量": round(top15_diff_ratio, 4),
+                "前15大分點淨買超 / 全市場總買量": round(top15_buy_over_market_buy_ratio, 4),
                 "近3日買超賣超家數比": round(recent_3d_branch_count_ratio, 4),
                 "近10日買超賣超家數比": round(recent_10d_branch_count_ratio, 4),
                 "家數比趨勢(3日-10日)": round(branch_ratio_trend_delta, 4),
@@ -603,6 +610,7 @@ def build_summary(
                 "買超金額最多分點": top_buy_name,
                 "買超金額最多分點買超成本": round(top_buy_cost, 2),
                 "買超金額最多分點平均買超價格": round(top_buy_avg_price, 2),
+                "TBC": round(tbc, 4),
                 "買超量最多分點": top_buy_shares_name,
                 "買超量": top_buy_net_shares,
                 "買超量/成交量佔比": round(top_buy_volume_share, 4),
@@ -613,6 +621,7 @@ def build_summary(
                 "獲利最高分點": best_profit_name,
                 "獲利最高分點獲利金額": round(best_profit_value, 2),
                 "獲利最高分點平均賣價": round(best_profit_avg_sell, 2),
+                "TSC": round(tsc, 4),
                 "賣超量最多分點": top_sell_shares_name,
                 "賣超量": top_sell_net_shares,
                 "賣超量/成交量佔比": round(top_sell_volume_share, 4),
@@ -672,7 +681,9 @@ def format_rows_for_output(rows: List[dict]) -> List[dict]:
         current["近10日買超賣超家數比"] = f"{float(current.get('近10日買超賣超家數比', 0)):.2f}"
         current["家數比趨勢(3日-10日)"] = f"{float(current.get('家數比趨勢(3日-10日)', 0)):.2f}"
         current["買超量/成交量佔比"] = f"{float(current.get('買超量/成交量佔比', 0)) * 100:.2f}%"
+        current["TBC"] = f"{float(current.get('TBC', 0)) * 100:.2f}%"
         current["賣超量/成交量佔比"] = f"{float(current.get('賣超量/成交量佔比', 0)) * 100:.2f}%"
+        current["TSC"] = f"{float(current.get('TSC', 0)) * 100:.2f}%"
         current["前15大分點買賣超差額/成交量佔比"] = f"{float(current.get('前15大分點買賣超差額/成交量佔比', 0)) * 100:.2f}%"
         current["大戶成本乖離率"] = f"{float(current.get('大戶成本乖離率', 0)) * 100:.2f}%"
         current["周轉率"] = f"{float(current.get('周轉率', 0)) * 100:.2f}%"

@@ -402,7 +402,7 @@ def start_ingest(st_placeholder=None):
         sid = stock["stock_id"]
         log(f"📂 **同步標的: {sid} {stock['name']}**")
         for key in enabled:
-            if key not in d_map:
+            if key not in d_map or key == "market_value":
                 continue
 
             fm_api, table, d_col, check_freq = d_map[key]
@@ -465,6 +465,65 @@ def start_ingest(st_placeholder=None):
             except Exception as e:
                 log(f"    ❌ [{key}] 失敗: {e}")
                 failed_log.append(f"{sid} {key}: {e}")
+
+            time.sleep(sleep_sec)
+
+    if "market_value" in enabled:
+        fm_api, table, d_col, check_freq = d_map["market_value"]
+        resolved_date_col = _resolve_column(conn, table, ["date"], configured_col=d_col)
+        market_value_log_id = "__MARKET_ALL__"
+        pending_dates = get_pending_dates(
+            conn,
+            market_value_log_id,
+            fm_api,
+            t_start,
+            target_end=t_end,
+            check_freq=check_freq,
+            retry_notrade_days=retry_notrade_days,
+        )
+
+        if pending_dates:
+            pending_ranges = _merge_dates_to_ranges(pending_dates)
+            ranges_txt = ", ".join(
+                [f"{s.strftime('%Y-%m-%d')}~{e.strftime('%Y-%m-%d')}" for s, e in pending_ranges]
+            )
+            log("📂 **同步標的: 全市場市值資料**")
+
+            try:
+                for d_str in [d.strftime("%Y-%m-%d") for d in pending_dates]:
+                    status = _get_data_ingest_status(conn, market_value_log_id, d_str, fm_api)
+                    if status == "Success":
+                        continue
+                    is_today = d_str == datetime.now().strftime("%Y-%m-%d")
+                    if (not is_today) and status == "NoTrade":
+                        day = datetime.strptime(d_str, "%Y-%m-%d").date()
+                        retry_cutoff = datetime.now().date() - timedelta(days=max(int(retry_notrade_days or 0), 0))
+                        if day < retry_cutoff:
+                            continue
+
+                    df = api.get_data(
+                        dataset=fm_api,
+                        start_date=d_str,
+                        end_date=d_str,
+                    )
+
+                    if df is not None and not df.empty:
+                        clean_df = process_data(df, table, conn)
+                        upsert_data(conn, table, clean_df)
+                        if resolved_date_col in clean_df.columns:
+                            db_count = int((clean_df[resolved_date_col].astype(str).str[:10] == d_str).sum())
+                        else:
+                            db_count = len(clean_df)
+                        _write_data_ingest_log(conn, d_str, market_value_log_id, fm_api, len(df), db_count, "Success")
+                    else:
+                        _write_data_ingest_log(conn, d_str, market_value_log_id, fm_api, 0, 0, "NoTrade")
+
+                    time.sleep(sleep_sec)
+
+                log(f"    🚀 [market_value] 同步成功: {ranges_txt}")
+            except Exception as e:
+                log(f"    ❌ [market_value] 失敗: {e}")
+                failed_log.append(f"market_value(all): {e}")
 
             time.sleep(sleep_sec)
 
