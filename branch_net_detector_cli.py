@@ -29,10 +29,11 @@ FIELDNAMES = [
     "平均賣超價格",
     "買超分點數",
     "賣超分點數",
-    "籌碼集中度",
-    "近3日籌碼集中度",
-    "近10日籌碼集中度",
-    "籌碼集中度趨勢(3日-10日)",
+    "買超賣超家數比",
+    "前15大分點淨買超 / 全市場總買量",
+    "近3日買超賣超家數比",
+    "近10日買超賣超家數比",
+    "家數比趨勢(3日-10日)",
     "總交易筆數",
     "買筆數最多分點",
     "買筆數",
@@ -387,7 +388,7 @@ def build_summary(
     for (stock_id, trader_id), tagg in trader_agg.items():
         stock_to_traders[stock_id].append((trader_id, tagg))
 
-    stock_daily_concentration: Dict[str, List[float]] = defaultdict(list)
+    stock_daily_branch_ratio: Dict[str, List[float]] = defaultdict(list)
     daily_trader_count: Dict[Tuple[str, str], List[int]] = defaultdict(lambda: [0, 0])
     for (stock_id, _trader_id, date), day_net in trader_day_net.items():
         key = (stock_id, date)
@@ -396,16 +397,16 @@ def build_summary(
         elif day_net < 0:
             daily_trader_count[key][1] += 1
 
-    daily_concentration_by_stock: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
+    daily_branch_ratio_by_stock: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
     for (stock_id, date), counts in daily_trader_count.items():
         buy_count, sell_count = counts
         total = buy_count + sell_count
-        concentration_value = ((buy_count - sell_count) / total) if total else 0.0
-        daily_concentration_by_stock[stock_id].append((date, concentration_value))
+        branch_ratio_value = (buy_count / sell_count) if sell_count > 0 else (float(buy_count) if buy_count > 0 else 0.0)
+        daily_branch_ratio_by_stock[stock_id].append((date, branch_ratio_value))
 
-    for stock_id, date_values in daily_concentration_by_stock.items():
+    for stock_id, date_values in daily_branch_ratio_by_stock.items():
         date_values.sort(key=lambda x: x[0])
-        stock_daily_concentration[stock_id] = [v for _, v in date_values]
+        stock_daily_branch_ratio[stock_id] = [v for _, v in date_values]
 
     output: List[dict] = []
     total_stocks = len(stock_agg)
@@ -416,9 +417,10 @@ def build_summary(
         sell_negative = [x for x in traders if x[1].net_shares < 0]
         buy_trader_count = len(buy_positive)
         sell_trader_count = len(sell_negative)
-        total_trader_count = buy_trader_count + sell_trader_count
-        concentration = (
-            (buy_trader_count - sell_trader_count) / total_trader_count if total_trader_count else 0.0
+        branch_count_ratio = (
+            (buy_trader_count / sell_trader_count)
+            if sell_trader_count > 0
+            else (float(buy_trader_count) if buy_trader_count > 0 else 0.0)
         )
 
         top_buy_trade_count = max(traders, key=lambda x: x[1].buy_trade_count, default=None)
@@ -517,23 +519,33 @@ def build_summary(
         top15_sell_total = sum(abs(tagg.net_shares) for _, tagg in sorted(sell_negative, key=lambda x: x[1].net_shares)[:15])
         top15_diff_ratio = ((top15_buy_total - top15_sell_total) / interval_total_volume) if interval_total_volume > 0 else 0.0
 
-        concentration_series = stock_daily_concentration.get(stock_id, [])
-        recent_3d_concentration = (
-            sum(concentration_series[-3:]) / min(3, len(concentration_series)) if concentration_series else 0.0
+        branch_ratio_series = stock_daily_branch_ratio.get(stock_id, [])
+        recent_3d_branch_count_ratio = (
+            sum(branch_ratio_series[-3:]) / min(3, len(branch_ratio_series)) if branch_ratio_series else 0.0
         )
-        recent_10d_concentration = (
-            sum(concentration_series[-10:]) / min(10, len(concentration_series)) if concentration_series else 0.0
+        recent_10d_branch_count_ratio = (
+            sum(branch_ratio_series[-10:]) / min(10, len(branch_ratio_series)) if branch_ratio_series else 0.0
         )
-        concentration_trend_delta = recent_3d_concentration - recent_10d_concentration
+        branch_ratio_trend_delta = recent_3d_branch_count_ratio - recent_10d_branch_count_ratio
 
         vol = volume_metrics.get(stock_id, {})
 
+        actual_holding_cost_basis = (
+            sum(max(tagg.net_shares, 0) * tagg.avg_buy_price for _, tagg in traders if tagg.net_shares > 0)
+            / sum(max(tagg.net_shares, 0) for _, tagg in traders if tagg.net_shares > 0)
+            if any(tagg.net_shares > 0 for _, tagg in traders)
+            else 0.0
+        )
         cost_deviation_rate = (
-            (latest_close_map.get(stock_id, 0.0) - top_buy_avg_price) / top_buy_avg_price if top_buy_avg_price > 0 else 0.0
+            (latest_close_map.get(stock_id, 0.0) - actual_holding_cost_basis) / actual_holding_cost_basis
+            if actual_holding_cost_basis > 0
+            else 0.0
         )
         latest_volume = float(vol.get("latest_volume", 0.0))
         latest_close = float(latest_close_map.get(stock_id, 0.0))
         market_value = float(market_value_map.get(stock_id, 0.0))
+        # FinMind TaiwanStockPrice.Trading_Volume 與 market_value / close 皆為「股」單位，
+        # 因此周轉率統一為：成交股數 / 發行股數。
         issued_shares = (market_value / latest_close) if latest_close > 0 else 0.0
         turnover_rate = (latest_volume / issued_shares) if issued_shares > 0 else 0.0
 
@@ -575,10 +587,11 @@ def build_summary(
                 "平均賣超價格": round(avg_sell_price, 2),
                 "買超分點數": buy_trader_count,
                 "賣超分點數": sell_trader_count,
-                "籌碼集中度": round(concentration, 4),
-                "近3日籌碼集中度": round(recent_3d_concentration, 4),
-                "近10日籌碼集中度": round(recent_10d_concentration, 4),
-                "籌碼集中度趨勢(3日-10日)": round(concentration_trend_delta, 4),
+                "買超賣超家數比": round(branch_count_ratio, 4),
+                "前15大分點淨買超 / 全市場總買量": round(top15_diff_ratio, 4),
+                "近3日買超賣超家數比": round(recent_3d_branch_count_ratio, 4),
+                "近10日買超賣超家數比": round(recent_10d_branch_count_ratio, 4),
+                "家數比趨勢(3日-10日)": round(branch_ratio_trend_delta, 4),
                 "總交易筆數": sagg.total_trade_count,
                 "買筆數最多分點": top_buy_trade_name,
                 "買筆數": top_buy_trade_total,
@@ -653,10 +666,11 @@ def format_rows_for_output(rows: List[dict]) -> List[dict]:
         ]:
             current[col] = _format_thousand(current.get(col, 0), digits)
 
-        current["籌碼集中度"] = f"{float(current.get('籌碼集中度', 0)):.2f}"
-        current["近3日籌碼集中度"] = f"{float(current.get('近3日籌碼集中度', 0)):.2f}"
-        current["近10日籌碼集中度"] = f"{float(current.get('近10日籌碼集中度', 0)):.2f}"
-        current["籌碼集中度趨勢(3日-10日)"] = f"{float(current.get('籌碼集中度趨勢(3日-10日)', 0)):.2f}"
+        current["買超賣超家數比"] = f"{float(current.get('買超賣超家數比', 0)):.2f}"
+        current["前15大分點淨買超 / 全市場總買量"] = f"{float(current.get('前15大分點淨買超 / 全市場總買量', 0)) * 100:.2f}%"
+        current["近3日買超賣超家數比"] = f"{float(current.get('近3日買超賣超家數比', 0)):.2f}"
+        current["近10日買超賣超家數比"] = f"{float(current.get('近10日買超賣超家數比', 0)):.2f}"
+        current["家數比趨勢(3日-10日)"] = f"{float(current.get('家數比趨勢(3日-10日)', 0)):.2f}"
         current["買超量/成交量佔比"] = f"{float(current.get('買超量/成交量佔比', 0)) * 100:.2f}%"
         current["賣超量/成交量佔比"] = f"{float(current.get('賣超量/成交量佔比', 0)) * 100:.2f}%"
         current["前15大分點買賣超差額/成交量佔比"] = f"{float(current.get('前15大分點買賣超差額/成交量佔比', 0)) * 100:.2f}%"
