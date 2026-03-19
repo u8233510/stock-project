@@ -657,10 +657,18 @@ def _format_thousand(value: object, digits: int = 0) -> str:
     return f"{num:,.{digits}f}" if digits > 0 else f"{int(round(num)):,}"
 
 
+def _format_stock_id_as_text(value: object) -> str:
+    stock_id = str(value or "").strip()
+    if not stock_id:
+        return ""
+    return f'="{stock_id}"'
+
+
 def format_rows_for_output(rows: List[dict]) -> List[dict]:
     formatted: List[dict] = []
     for row in rows:
         current = dict(row)
+        current["股票代號"] = _format_stock_id_as_text(current.get("股票代號", ""))
         for col, digits in [
             ("最新成交量", 0),
             ("區間平均成交量", 2),
