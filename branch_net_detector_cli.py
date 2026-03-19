@@ -161,17 +161,40 @@ def load_branch_rows(conn: sqlite3.Connection, start: str, end: str) -> Iterable
     return conn.execute(sql, (start, end))
 
 
+def _get_table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+
+def _resolve_trade_detail_source(conn: sqlite3.Connection) -> Tuple[str, str]:
+    """Resolve the daily trade table/volume column across legacy DB variants."""
+    candidate_tables = ("stock_daily_trade_detail", "stock_ohlcv_daily")
+    candidate_columns = ("Trading_Volume", "trading_volume", "volume")
+
+    for table_name in candidate_tables:
+        columns = _get_table_columns(conn, table_name)
+        if not columns:
+            continue
+        for column_name in candidate_columns:
+            if column_name in columns:
+                return table_name, column_name
+
+    raise sqlite3.OperationalError(
+        "找不到可用的日成交資料表或成交量欄位，預期為 stock_daily_trade_detail/stock_ohlcv_daily 與 Trading_Volume。"
+    )
+
+
 def load_latest_close(conn: sqlite3.Connection, end: str) -> Dict[str, float]:
+    trade_table, _volume_column = _resolve_trade_detail_source(conn)
     sql = """
     SELECT d.stock_id, d.close
-    FROM stock_daily_trade_detail d
+    FROM {trade_table} d
     JOIN (
         SELECT stock_id, MAX(date) AS max_date
-        FROM stock_daily_trade_detail
+        FROM {trade_table}
         WHERE date <= ?
         GROUP BY stock_id
     ) m ON d.stock_id = m.stock_id AND d.date = m.max_date
-    """
+    """.format(trade_table=trade_table)
     return {normalize_stock_id(sid): float(close or 0.0) for sid, close in conn.execute(sql, (end,)).fetchall()}
 
 
@@ -203,19 +226,20 @@ def load_latest_market_value(conn: sqlite3.Connection, end: str) -> Dict[str, fl
 
 
 def load_volume_metrics(conn: sqlite3.Connection, start: str, end: str) -> Dict[str, dict]:
+    trade_table, volume_column = _resolve_trade_detail_source(conn)
     sql = """
     WITH latest_day AS (
         SELECT stock_id, MAX(date) AS latest_date
-        FROM stock_daily_trade_detail
+        FROM {trade_table}
         WHERE date <= ?
         GROUP BY stock_id
     ),
     interval_avg AS (
         SELECT
             stock_id,
-            AVG(COALESCE(Trading_Volume, 0)) AS interval_avg_volume,
-            SUM(COALESCE(Trading_Volume, 0)) AS interval_total_volume
-        FROM stock_daily_trade_detail
+            AVG(COALESCE({volume_column}, 0)) AS interval_avg_volume,
+            SUM(COALESCE({volume_column}, 0)) AS interval_total_volume
+        FROM {trade_table}
         WHERE date BETWEEN ? AND ?
         GROUP BY stock_id
     ),
@@ -223,9 +247,9 @@ def load_volume_metrics(conn: sqlite3.Connection, start: str, end: str) -> Dict[
         SELECT
             d.stock_id,
             d.date,
-            COALESCE(d.Trading_Volume, 0) AS volume,
+            COALESCE(d.{volume_column}, 0) AS volume,
             ROW_NUMBER() OVER (PARTITION BY d.stock_id ORDER BY d.date DESC) AS rn
-        FROM stock_daily_trade_detail d
+        FROM {trade_table} d
         JOIN latest_day ld
             ON ld.stock_id = d.stock_id
            AND d.date <= ld.latest_date
@@ -245,7 +269,7 @@ def load_volume_metrics(conn: sqlite3.Connection, start: str, end: str) -> Dict[
     LEFT JOIN latest_window lw
         ON lw.stock_id = ld.stock_id
     GROUP BY ld.stock_id, latest.volume, ia.interval_avg_volume, ia.interval_total_volume
-    """
+    """.format(trade_table=trade_table, volume_column=volume_column)
 
     metrics: Dict[str, dict] = {}
     for sid, latest_v, interval_avg_v, interval_total_v, recent3_v, recent5_v in conn.execute(
@@ -263,12 +287,13 @@ def load_volume_metrics(conn: sqlite3.Connection, start: str, end: str) -> Dict[
 
 
 def load_interval_volume_trend(conn: sqlite3.Connection, start: str, end: str) -> Dict[str, str]:
+    trade_table, volume_column = _resolve_trade_detail_source(conn)
     sql = """
-    SELECT stock_id, date, COALESCE(Trading_Volume, 0) AS volume
-    FROM stock_daily_trade_detail
+    SELECT stock_id, date, COALESCE({volume_column}, 0) AS volume
+    FROM {trade_table}
     WHERE date BETWEEN ? AND ?
     ORDER BY stock_id, date
-    """
+    """.format(trade_table=trade_table, volume_column=volume_column)
 
     def ema(values: List[float], span: int) -> float:
         if not values:
