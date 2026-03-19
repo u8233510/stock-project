@@ -30,7 +30,7 @@ FIELDNAMES = [
     "買超分點數",
     "賣超分點數",
     "買超賣超家數比",
-    "前15大分點淨買超 / 全市場總買量",
+    "前15大分點買超量 / 全市場總買量",
     "近3日買超賣超家數比",
     "近10日買超賣超家數比",
     "家數比趨勢(3日-10日)",
@@ -521,7 +521,7 @@ def build_summary(
         top15_buy_total = sum(tagg.net_shares for _, tagg in sorted(buy_positive, key=lambda x: x[1].net_shares, reverse=True)[:15])
         top15_sell_total = sum(abs(tagg.net_shares) for _, tagg in sorted(sell_negative, key=lambda x: x[1].net_shares)[:15])
         top15_net_buy = top15_buy_total - top15_sell_total
-        top15_buy_over_market_buy_ratio = (top15_net_buy / market_total_buy_volume) if market_total_buy_volume > 0 else 0.0
+        top15_buy_over_market_buy_ratio = (top15_buy_total / market_total_buy_volume) if market_total_buy_volume > 0 else 0.0
         top15_diff_ratio = (top15_net_buy / interval_total_volume) if interval_total_volume > 0 else 0.0
 
         branch_ratio_series = stock_daily_branch_ratio.get(stock_id, [])
@@ -595,7 +595,7 @@ def build_summary(
                 "買超分點數": buy_trader_count,
                 "賣超分點數": sell_trader_count,
                 "買超賣超家數比": round(branch_count_ratio, 4),
-                "前15大分點淨買超 / 全市場總買量": round(top15_buy_over_market_buy_ratio, 4),
+                "前15大分點買超量 / 全市場總買量": round(top15_buy_over_market_buy_ratio, 4),
                 "近3日買超賣超家數比": round(recent_3d_branch_count_ratio, 4),
                 "近10日買超賣超家數比": round(recent_10d_branch_count_ratio, 4),
                 "家數比趨勢(3日-10日)": round(branch_ratio_trend_delta, 4),
@@ -676,7 +676,7 @@ def format_rows_for_output(rows: List[dict]) -> List[dict]:
             current[col] = _format_thousand(current.get(col, 0), digits)
 
         current["買超賣超家數比"] = f"{float(current.get('買超賣超家數比', 0)):.2f}"
-        current["前15大分點淨買超 / 全市場總買量"] = f"{float(current.get('前15大分點淨買超 / 全市場總買量', 0)) * 100:.2f}%"
+        current["前15大分點買超量 / 全市場總買量"] = f"{float(current.get('前15大分點買超量 / 全市場總買量', 0)) * 100:.2f}%"
         current["近3日買超賣超家數比"] = f"{float(current.get('近3日買超賣超家數比', 0)):.2f}"
         current["近10日買超賣超家數比"] = f"{float(current.get('近10日買超賣超家數比', 0)):.2f}"
         current["家數比趨勢(3日-10日)"] = f"{float(current.get('家數比趨勢(3日-10日)', 0)):.2f}"
